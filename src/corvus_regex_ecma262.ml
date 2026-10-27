@@ -117,9 +117,12 @@ type t = {
   pattern : string;
   flags : flags;
   (* The program for a match that needs no groups: it records only the groups some backreference names. *)
-  prog : Compile.program;
+  prog : Prog.t;
   (* The program that records every group, built the first time a match asks for the groups. *)
-  caps : Compile.program option Atomic.t;
+  caps : Prog.t option Atomic.t;
+  (* The automaton of the pattern over ASCII text (see Dfa), built on the first match that wants it, for a pattern that
+     needs no backtracking and is small enough to be tried for one; None for any other. *)
+  dfa : Dfa.t option Once.t option;
   group_count : int;
   names : group_name list;
   (* The time a match may take in nanoseconds, or 0 for no limit. *)
@@ -157,13 +160,23 @@ let compile_with_ns pattern flags timeout =
             (fun (name, groups) -> { name = utf8_of_runes name; name16 = utf16_of_runes name; groups })
             (Parse.group_names ps)
         in
-        let prog, _, _ = Compile.compile_program root (flags.unicode || flags.unicode_sets) None in
+        let prog = Prog.make root (flags.unicode || flags.unicode_sets) None in
+        let regular = (not ps.Parse.needs_backtracking) && Dfa.re2_cost root <= Dfa.max_re2_cost in
+        let dfa =
+          if regular then
+            (* Built from the pattern read again, so that a pattern does not keep its tree. *)
+            Some
+              (Once.make (fun () ->
+                   match Parse.parse_with pattern (syntax flags) with root, _ -> Dfa.build root | exception _ -> None))
+          else None
+        in
         Ok
           {
             pattern;
             flags;
             prog;
             caps = Atomic.make None;
+            dfa;
             group_count = Parse.group_count ps;
             names;
             timeout;
@@ -198,13 +211,13 @@ let unicode re = re.flags.unicode || re.flags.unicode_sets
 
 (* The program that records every group. *)
 let caps_program re =
-  if re.prog.groups = re.group_count then re.prog
+  if re.prog.p.groups = re.group_count then re.prog
   else
     match Atomic.get re.caps with
     | Some p -> p
     | None ->
         let root, _ = Parse.parse_with re.pattern (syntax re.flags) in
-        let p, _, _ = Compile.compile_program root (unicode re) (Some re.group_count) in
+        let p = Prog.make root (unicode re) (Some re.group_count) in
         ignore (Atomic.compare_and_set re.caps None (Some p));
         p
 
@@ -252,7 +265,8 @@ let utf8_text_exn ?off ?len s =
 (* What the operations over each encoding need of it. *)
 module type ENC = sig
   val utf8 : bool
-  val match_with : Compile.program -> Vm_state.t -> Units.text -> int -> bool -> int -> int
+  val match_with : Prog.t -> Vm_state.t -> Units.text -> int -> bool -> int -> int
+  val dfa_is_match : Dfa.t -> Units.text -> int
   val normalize : Units.text -> int -> bool -> int
   val advance : Units.text -> int -> bool -> int
   val push_lossy : Buffer.t -> Units.text -> int -> int -> unit
@@ -262,6 +276,7 @@ end
 module E8 = struct
   let utf8 = true
   let match_with = Vm8.match_with
+  let dfa_is_match = Vm8.dfa_is_match
   let normalize = Units.Units8.normalize
   let advance = Units.Units8.advance
   let push_lossy = Units.Units8.push_lossy
@@ -271,6 +286,7 @@ end
 module E16 = struct
   let utf8 = false
   let match_with = Vm16.match_with
+  let dfa_is_match = Vm16.dfa_is_match
   let normalize = Units.Units16.normalize
   let advance = Units.Units16.advance
   let push_lossy = Units.Units16.push_lossy
@@ -311,8 +327,16 @@ module Ops (E : ENC) = struct
     Buffer.contents b
 
   let is_match ?scratch ?(pos = 0) re t =
-    let out = [| 0; 0 |] in
-    exec re scratch t pos re.flags.sticky false out
+    let decided =
+      match re.dfa with
+      | Some d when pos = 0 && not re.flags.sticky -> (
+          match Once.get d with Some d -> E.dfa_is_match d t | None -> -1)
+      | _ -> -1
+    in
+    if decided >= 0 then decided = 1
+    else
+      with_state re scratch (fun st ->
+          exec re (Some st) t pos re.flags.sticky false st.out)
 
   let find ?scratch ?(pos = 0) re t =
     let slots = Array.make (2 * (re.group_count + 1)) (-1) in

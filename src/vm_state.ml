@@ -118,6 +118,11 @@ type t = {
   mutable width : int;
   mutable checks : int;
   mutable points : int;
+  (* Where an occurrence of the search's literals ends (out.(0)), a place an automaton reached (out.(1)), the starts an
+     occurrence allows (out.(2) and out.(3), see starts_before in the matcher), and the buffer the packed search over
+     UTF-16 packs units into, made on the first search that wants it. *)
+  out : int array;
+  mutable pack : Bytes.t;
 }
 
 let create () =
@@ -138,6 +143,8 @@ let create () =
     width = 0;
     checks = 0;
     points = 0;
+    out = [| 0; 0; 0; 0 |];
+    pack = Bytes.empty;
   }
 
 (* Takes the memory of failed places into use when the match has made enough steps to pay for it. *)
