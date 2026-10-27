@@ -3,7 +3,7 @@
 (name corvus-regex-ecma262)
 
 ; The version of the package. Main keeps 0.0.0, and a release writes its own (.github/release.json).
-(version 0.0.0)
+(version 0.1.0)
 
 (generate_opam_files true)
 

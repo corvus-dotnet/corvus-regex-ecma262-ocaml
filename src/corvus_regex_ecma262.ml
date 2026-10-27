@@ -1,7 +1,7 @@
 (* ECMA-262 regular expressions over UTF-8 and UTF-16 (regex.rs, replace.rs and lib.rs of the Rust crate). See the
    interface for what each member does. *)
 
-let version = "0.0.0"
+let version = "0.1.0"
 let unicode_version = Ucd_tables.version
 
 type flags = {
