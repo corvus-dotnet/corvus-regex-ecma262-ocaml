@@ -6,6 +6,10 @@
    The UTF-8 searches take the text as a string and absolute offsets; the UTF-16 searches take a text (Units.text) and
    positions in its units. *)
 
+(* min and max on ints: the library's are polymorphic, and without flambda each call compares through compare_val. *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 (* The most units of a literal the packed search takes, so that the chunks' overlap stays short. *)
 let packed_longest = 64
 

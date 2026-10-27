@@ -268,6 +268,63 @@ value cre_index_ranges_byte(value s, value from, value n, value ranges, value nr
     return Val_long(cre_index_ranges(s, Long_val(from), Long_val(n), ranges, Long_val(nr)));
 }
 
+/* The first position in [from, n) whose byte is not an ASCII member of the set whose nibble bitmap is nib (16 bytes:
+   byte l holds bit h for the member 16 * h + l), or n. A byte at or beyond 0x80 has a high nibble of 8 or more, whose
+   bit is none of the eight, so it ends the run. With a byte shuffle, sixteen bytes a step: the bitmap's byte of each
+   byte's low nibble, and the bit of its high nibble. */
+#if defined(CRE_HAS_TARGETS)
+CRE_TARGET("ssse3")
+static intnat ascii_run_ssse3(bytes t, intnat k, intnat n, bytes nib)
+{
+    __m128i map = _mm_loadu_si128((const __m128i *)nib);
+    __m128i bit = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char)128, 0, 0, 0, 0, 0, 0, 0, 0);
+    __m128i low = _mm_set1_epi8(0x0F), zero = _mm_setzero_si128();
+    for (; k + 16 <= n; k += 16) {
+        __m128i x = _mm_loadu_si128((const __m128i *)(t + k));
+        __m128i row = _mm_shuffle_epi8(map, _mm_and_si128(x, low));
+        __m128i b = _mm_shuffle_epi8(bit, _mm_and_si128(_mm_srli_epi16(x, 4), low));
+        int m = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(row, b), zero));
+        if (m) return k + CRE_CTZ32((uint32_t)m);
+    }
+    return k;
+}
+#endif
+
+intnat cre_ascii_run_end(value s, intnat from, intnat n, value nibbles)
+{
+    bytes t = TEXT(s), nib = TEXT(nibbles);
+    intnat k = from;
+#if defined(CRE_HAS_TARGETS)
+    if (has_ssse3()) {
+        k = ascii_run_ssse3(t, k, n, nib);
+        if (k + 16 <= n) return k;
+    }
+#elif defined(CRE_NEON)
+    {
+        uint8x16_t map = vld1q_u8(nib);
+        static const uint8_t bits[16] = {1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0};
+        uint8x16_t bit = vld1q_u8(bits), low = vdupq_n_u8(0x0F);
+        for (; k + 16 <= n; k += 16) {
+            uint8x16_t x = vld1q_u8(t + k);
+            uint8x16_t row = vqtbl1q_u8(map, vandq_u8(x, low));
+            uint8x16_t b = vqtbl1q_u8(bit, vshrq_n_u8(x, 4));
+            uint64_t m = neon_mask(vceqq_u8(vandq_u8(row, b), vdupq_n_u8(0)));
+            if (m) return k + (CRE_CTZ64(m) >> 2);
+        }
+    }
+#endif
+    for (; k < n; k++) {
+        unsigned char x = t[k];
+        if (x >= 0x80 || !(nib[x & 15] & (1 << (x >> 4)))) return k;
+    }
+    return n;
+}
+
+value cre_ascii_run_end_byte(value s, value from, value n, value nibbles)
+{
+    return Val_long(cre_ascii_run_end(s, Long_val(from), Long_val(n), nibbles));
+}
+
 /* The starts of the runs of len set bits (1 to 64) that lie wholly in the 64 bits of m: bit i of the result is set when
    bits i to i + len - 1 of m are. The runs are found by doubling: a run of 2k bits is a run of k bits whose bit k on is
    a run of k bits too. */

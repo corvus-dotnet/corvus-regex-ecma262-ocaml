@@ -12,6 +12,10 @@
    shifted left by three and the width in the low three bits, so that reading one allocates nothing on any compiler
    (a pair would be a block, which only flambda removes). *)
 
+(* min and max on ints: the library's are polymorphic, and without flambda each call compares through compare_val. *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 type text = { s : string; base : int; len : int }
 
 (* What a byte that is not UTF-8 decodes to, one byte at a time. *)

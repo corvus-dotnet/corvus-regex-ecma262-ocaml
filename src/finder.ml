@@ -7,6 +7,10 @@
    Every search takes the text as a string and the end of what it may read, and returns where the first literal found
    starts, in the pattern's order of those that start there, writing where it ends into out.(0); or -1. *)
 
+(* min and max on ints: the library's are polymorphic, and without flambda each call compares through compare_val. *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 (* ByteRank is how common each byte is in text, from 0 (rare) to 255: the table memchr::memmem ranks a needle's bytes by
    (memchr 2.8, arch/all/packedpair/default_rank.rs; MIT or Unlicense), which pair8.rs takes. *)
 let byte_rank =

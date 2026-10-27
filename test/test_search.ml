@@ -463,7 +463,30 @@ let test_index_run () =
       (Printf.sprintf "index_run of a run of %d from %d over %d bytes" len from n)
   done
 
+(* The end of a run of a set's ASCII members (Kernels.ascii_run_end) is where a plain loop stops: random sets, texts that
+   hold bytes beyond ASCII, every start. *)
+let test_ascii_run_end () =
+  seed := 0x1234567;
+  for _ = 1 to 300 do
+    let members = Array.init 128 (fun _ -> next () mod 3 <> 0) in
+    let cs =
+      Corvus_regex_ecma262__Charset.make
+        (Array.concat (List.filter_map (fun c -> if members.(c) then Some [| c; c |] else None) (List.init 128 Fun.id)))
+    in
+    let n = next () mod 200 in
+    let s = String.init n (fun _ -> Char.chr (if next () mod 20 = 0 then 0x80 + (next () mod 128) else next () mod 128)) in
+    let from = if n = 0 then 0 else next () mod n in
+    let k = ref from in
+    while !k < n && Char.code s.[!k] < 0x80 && members.(Char.code s.[!k]) do
+      incr k
+    done;
+    check
+      (Kernels.ascii_run_end s from n cs.nibbles = !k)
+      (Printf.sprintf "ascii_run_end from %d over %d bytes" from n)
+  done
+
 let () =
+  test_ascii_run_end ();
   test_index_run ();
   test_searches_find_what_every_position_finds ();
   test_starts_the_fuzzer_found ();

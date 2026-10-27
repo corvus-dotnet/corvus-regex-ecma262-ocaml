@@ -36,6 +36,12 @@ external index_run :
   = "cre_index_run_byte" "cre_index_run"
 [@@noalloc]
 
+(* The first position in [from, n) whose byte is not an ASCII member of a set given as its nibble bitmap
+   (Charset.t.nibbles), or n: the end of a run of the set's ASCII members, a byte beyond ASCII ending it too. *)
+external ascii_run_end : string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged])
+  = "cre_ascii_run_end_byte" "cre_ascii_run_end"
+[@@noalloc]
+
 (* The last position in [lo, hi) whose byte is one of count (one to three) bytes of back, or -1. *)
 external last_of : string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged])
   = "cre_last_of_byte" "cre_last_of"

@@ -6,6 +6,10 @@
 open Compile
 open Vm_state
 
+(* min and max on ints: the library's are polymorphic, and without flambda each call compares through compare_val. *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 let[@inline] rune_of p = p lsr 3
 let[@inline] width_of p = p land 7
 
@@ -984,7 +988,12 @@ let end_of_run (pr : Prog.t) (cs : Charset.t) (t : Units.text) at =
   let n = t.len and at = ref at and fin = ref false in
   while (not !fin) && !at < n do
     let c = T.get t !at in
-    if c < 0x80 then if Charset.has_ascii cs c then incr at else fin := true
+    if c < 0x80 then
+      if Charset.has_ascii cs c then
+        (* Over UTF-8 the rest of the run of ASCII members by the kernel, sixteen bytes a step. *)
+        if T.utf8 then at := Kernels.ascii_run_end t.s (t.base + !at + 1) (t.base + n) cs.nibbles - t.base
+        else incr at
+      else fin := true
     else begin
       let p = T.read t !at pr.p.units in
       if Charset.contains cs (rune_of p) then at := !at + width_of p else fin := true

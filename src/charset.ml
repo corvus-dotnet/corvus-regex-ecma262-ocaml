@@ -6,8 +6,9 @@ let max_rune = Ucd.max_rune
 
 (* An immutable set of code points. The ranges are sorted, inclusive pairs that neither overlap nor touch. ascii
    repeats the membership of the code points below 128, a byte each ('\001' for a member), so that the common case is
-   one read; the crate keeps it as two 64-bit words, which an OCaml int cannot hold. *)
-type t = { ranges : int array; ascii : string }
+   one read; the crate keeps it as two 64-bit words, which an OCaml int cannot hold. nibbles is the ASCII members again
+   as the run search of a set reads them (Kernels.ascii_run_end): byte l holds bit h for the member 16 * h + l. *)
+type t = { ranges : int array; ascii : string; nibbles : string }
 
 (* Builds a set from inclusive pairs in any order, which may overlap. With negate it builds the complement. *)
 let make ?(negate = false) (pairs : int array) =
@@ -57,7 +58,12 @@ let make ?(negate = false) (pairs : int array) =
        done
      done
    with Exit -> ());
-  { ranges; ascii = Bytes.unsafe_to_string ascii }
+  let nibbles = Bytes.make 16 '\000' in
+  for c = 0 to 127 do
+    if Bytes.get ascii c <> '\000' then
+      Bytes.set nibbles (c land 15) (Char.chr (Char.code (Bytes.get nibbles (c land 15)) lor (1 lsl (c lsr 4))))
+  done;
+  { ranges; ascii = Bytes.unsafe_to_string ascii; nibbles = Bytes.unsafe_to_string nibbles }
 
 (* Whether the set holds the ASCII character (c below 128). *)
 let has_ascii s c = String.unsafe_get s.ascii (c land 127) <> '\000'
