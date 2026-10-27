@@ -1,0 +1,8 @@
+; The ECMA-262 regular expression engine. The search kernels are C (cre_stubs.c), called as externals that allocate
+; nothing; everything else is OCaml.
+
+(library
+ (name corvus_regex_ecma262)
+ (public_name corvus-regex-ecma262)
+ (ocamlopt_flags (:standard -O3 -inline 200))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-70)))
