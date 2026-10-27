@@ -268,13 +268,73 @@ value cre_index_ranges_byte(value s, value from, value n, value ranges, value nr
     return Val_long(cre_index_ranges(s, Long_val(from), Long_val(n), ranges, Long_val(nr)));
 }
 
+/* The starts of the runs of len set bits (1 to 64) that lie wholly in the 64 bits of m: bit i of the result is set when
+   bits i to i + len - 1 of m are. The runs are found by doubling: a run of 2k bits is a run of k bits whose bit k on is
+   a run of k bits too. */
+static inline uint64_t runs_in(uint64_t m, intnat len)
+{
+    uint64_t a = m;
+    intnat have = 1;
+    while (have * 2 <= len) {
+        a &= a >> have;
+        have *= 2;
+    }
+    if (len > have) a &= a >> (len - have);
+    /* A start whose run would pass the top of the word is not one: the bits above it are not known. */
+    if (len > 1) a &= ~0ULL >> (len - 1);
+    return a;
+}
+
 /* The first position in [from, n) of a run of len bytes (1 to 64), each in one of nr ranges as cre_index_ranges takes
-   them, or -1: the skip window's search, a start having a byte the window holds at each of its places. */
+   them, or -1: the skip window's search, a start having a byte the window holds at each of its places. The vector forms
+   read 64 bytes as a mask, one bit a byte, and find the runs in it (runs_in); the next block starts len - 1 bytes before
+   the end of this one, so every run lies wholly in some block. */
 intnat cre_index_run(value s, intnat from, intnat n, value ranges, intnat nr, intnat len)
 {
     bytes t = TEXT(s), r = TEXT(ranges);
+    intnat k = from;
+#if defined(CRE_X86)
+    __m128i lo[4], w[4];
+    for (int q = 0; q < nr; q++) {
+        lo[q] = _mm_set1_epi8((char)r[2 * q]);
+        w[q] = _mm_set1_epi8((char)r[2 * q + 1]);
+    }
+    for (; k + 64 <= n; k += 64 - len + 1) {
+        uint64_t m = 0;
+        for (int b = 0; b < 4; b++) {
+            __m128i x = _mm_loadu_si128((const __m128i *)(t + k + 16 * b)), any = _mm_setzero_si128();
+            for (int q = 0; q < nr; q++) {
+                __m128i dlt = _mm_sub_epi8(x, lo[q]);
+                any = _mm_or_si128(any, _mm_cmpeq_epi8(_mm_min_epu8(dlt, w[q]), dlt));
+            }
+            m |= (uint64_t)(uint32_t)_mm_movemask_epi8(any) << (16 * b);
+        }
+        uint64_t a = runs_in(m, len);
+        if (a) return k + CRE_CTZ64(a);
+    }
+#elif defined(CRE_NEON)
+    uint8x16_t lo[4], w[4];
+    for (int q = 0; q < nr; q++) {
+        lo[q] = vdupq_n_u8(r[2 * q]);
+        w[q] = vdupq_n_u8(r[2 * q + 1]);
+    }
+    static const uint8_t weights[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+    uint8x16_t wt = vld1q_u8(weights);
+    for (; k + 64 <= n; k += 64 - len + 1) {
+        uint64_t m = 0;
+        for (int b = 0; b < 4; b++) {
+            uint8x16_t x = vld1q_u8(t + k + 16 * b), any = vdupq_n_u8(0);
+            for (int q = 0; q < nr; q++) any = vorrq_u8(any, vcleq_u8(vsubq_u8(x, lo[q]), w[q]));
+            uint8x16_t bits = vandq_u8(any, wt);
+            uint64_t half = (uint64_t)vaddv_u8(vget_low_u8(bits)) | ((uint64_t)vaddv_u8(vget_high_u8(bits)) << 8);
+            m |= half << (16 * b);
+        }
+        uint64_t a = runs_in(m, len);
+        if (a) return k + CRE_CTZ64(a);
+    }
+#endif
     intnat run = 0;
-    for (intnat k = from; k < n; k++) {
+    for (; k < n; k++) {
         int hit = 0;
         for (int q = 0; q < nr; q++)
             if ((unsigned char)(t[k] - r[2 * q]) <= r[2 * q + 1]) hit = 1;
@@ -282,12 +342,6 @@ intnat cre_index_run(value s, intnat from, intnat n, value ranges, intnat nr, in
             if (++run >= len) return k - len + 1;
         } else {
             run = 0;
-#if defined(CRE_X86) || defined(CRE_NEON)
-            /* After a byte the window does not hold, a block of 16 that holds none of its bytes is passed whole. */
-            if (k + 1 + 16 <= n && cre_index_ranges(s, k + 1, k + 17, ranges, nr) < 0) {
-                k += 16;
-            }
-#endif
         }
     }
     return -1;

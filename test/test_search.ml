@@ -427,7 +427,44 @@ let test_without_vectors () =
   Kernels.has_shuffle := shuffle;
   Kernels.has_wide := wide
 
+(* The skip window's run search (Kernels.index_run) finds what a plain search for the first run finds: random texts of a
+   few byte values, random ranges, every length of run from 1 to 64 and every start. *)
+let test_index_run () =
+  seed := 0x5DEECE66D;
+  let reference s from n (ranges : string) nr len =
+    let in_ranges c =
+      let hit = ref false in
+      for q = 0 to nr - 1 do
+        if (c - Char.code ranges.[2 * q]) land 0xFF <= Char.code ranges.[(2 * q) + 1] then hit := true
+      done;
+      !hit
+    in
+    let run = ref 0 and found = ref (-1) and k = ref from in
+    while !found < 0 && !k < n do
+      if in_ranges (Char.code s.[!k]) then begin
+        incr run;
+        if !run >= len then found := !k - len + 1
+      end
+      else run := 0;
+      incr k
+    done;
+    !found
+  in
+  for _ = 1 to 300 do
+    let n = next () mod 400 in
+    let alphabet = "ab1-9 \x80\xff" in
+    let s = String.init n (fun _ -> alphabet.[next () mod String.length alphabet]) in
+    let nr = 1 + (next () mod 4) in
+    let ranges = String.init (2 * nr) (fun k -> Char.chr (if k mod 2 = 0 then next () mod 256 else next () mod 64)) in
+    let len = 1 + (next () mod 64) in
+    let from = if n = 0 then 0 else next () mod n in
+    check
+      (Kernels.index_run s from n ranges nr len = reference s from n ranges nr len)
+      (Printf.sprintf "index_run of a run of %d from %d over %d bytes" len from n)
+  done
+
 let () =
+  test_index_run ();
   test_searches_find_what_every_position_finds ();
   test_starts_the_fuzzer_found ();
   test_rare_literal ();
