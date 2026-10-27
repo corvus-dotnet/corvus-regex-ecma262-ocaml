@@ -60,9 +60,35 @@ A match that reaches its limit raises `Match_timeout` or `Match_memory`; text th
 
 ## Status
 
-Not yet released. The parser, the compiler, the matcher and the search layer are in, over both encodings, and the whole
-test data passes. The harness of the central benchmark site comes next, then the first release, 0.1.0, to
-opam-repository.
+0.1.0 is the first release. The parser, the compiler, the matcher and the crate's search layer (where a match can
+start, and the automata) are in, the whole test data passes, and the central benchmark site runs the harness each
+night. `docs/port-checklist.md` lists every optimisation of the search layer and how this port has it, and the rows
+still slower than V8.
+
+## Installing
+
+```sh
+opam install corvus-regex-ecma262
+```
+
+and name the library in dune:
+
+```
+(executable
+ (name main)
+ (libraries corvus-regex-ecma262))
+```
+
+The package needs a C compiler, which `ocamlopt` needs anyway, for the search kernels.
+
+## Benchmarks
+
+The [central benchmark site](https://corvus-oss.org/corvus-regex-ecma262-benchmarks/) runs this repository's harness
+image, `ghcr.io/corvus-dotnet/corvus-regex-ecma262-ocaml`, each night beside the engines of every other source: this
+library over UTF-8 and UTF-16, `re` (ocaml-re) and `pcre2`, which do not claim ECMA-262, and V8, over the Industry
+workloads of dotnet/performance, with each ECMA-262 engine's compliance over the test data. This repository publishes
+no figures of its own. `tools/benchmarks/run.sh <workloads.json> <texts> <out.json>` runs the same harness anywhere
+(see the script for what it needs).
 
 ## Building and testing
 
