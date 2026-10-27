@@ -324,7 +324,7 @@ value cre_last_of_byte(value s, value lo, value hi, value back, value count)
 intnat cre_pair_find(value s, intnat at, intnat last, intnat n, intnat i, intnat j, value tests, intnat ni, intnat nj)
 {
     bytes t = TEXT(s), q = TEXT(tests);
-    intnat far = i > j ? i : j;
+    intnat reach = i > j ? i : j;
     intnat st = at;
 #if defined(CRE_X86)
     __m128i mi[4], vi[4], mj[4], vj[4];
@@ -333,7 +333,7 @@ intnat cre_pair_find(value s, intnat at, intnat last, intnat n, intnat i, intnat
         mj[k] = _mm_set1_epi8((char)q[2 * (ni + k)]);
         vj[k] = _mm_set1_epi8((char)q[2 * (ni + k) + 1]);
     }
-    for (; st <= last && st + far + 16 <= n; st += 16) {
+    for (; st <= last && st + reach + 16 <= n; st += 16) {
         __m128i xi = _mm_loadu_si128((const __m128i *)(t + st + i)), xj = _mm_loadu_si128((const __m128i *)(t + st + j));
         __m128i ai = _mm_setzero_si128(), aj = _mm_setzero_si128();
         for (int k = 0; k < ni; k++) ai = _mm_or_si128(ai, _mm_cmpeq_epi8(_mm_or_si128(xi, mi[k]), vi[k]));
@@ -348,7 +348,7 @@ intnat cre_pair_find(value s, intnat at, intnat last, intnat n, intnat i, intnat
     uint8x16_t mi[4], vi[4], mj[4], vj[4];
     for (int k = 0; k < ni; k++) { mi[k] = vdupq_n_u8(q[2 * k]); vi[k] = vdupq_n_u8(q[2 * k + 1]); }
     for (int k = 0; k < nj; k++) { mj[k] = vdupq_n_u8(q[2 * (ni + k)]); vj[k] = vdupq_n_u8(q[2 * (ni + k) + 1]); }
-    for (; st <= last && st + far + 16 <= n; st += 16) {
+    for (; st <= last && st + reach + 16 <= n; st += 16) {
         uint8x16_t xi = vld1q_u8(t + st + i), xj = vld1q_u8(t + st + j), ai = vdupq_n_u8(0), aj = vdupq_n_u8(0);
         for (int k = 0; k < ni; k++) ai = vorrq_u8(ai, vceqq_u8(vorrq_u8(xi, mi[k]), vi[k]));
         for (int k = 0; k < nj; k++) aj = vorrq_u8(aj, vceqq_u8(vorrq_u8(xj, mj[k]), vj[k]));
@@ -359,7 +359,7 @@ intnat cre_pair_find(value s, intnat at, intnat last, intnat n, intnat i, intnat
         }
     }
 #endif
-    for (; st <= last && st + far < n; st++) {
+    for (; st <= last && st + reach < n; st++) {
         unsigned char xi = t[st + i], xj = t[st + j];
         int pi = 0, pj = 0;
         for (int k = 0; k < ni; k++) pi |= (xi | q[2 * k]) == q[2 * k + 1];
@@ -382,9 +382,9 @@ CRE_TARGET("avx2")
 static intnat eq2_avx2(bytes t, intnat st, intnat last, intnat n, intnat i, intnat j, unsigned char a, unsigned char b,
                        intnat *next)
 {
-    intnat far = i > j ? i : j;
+    intnat reach = i > j ? i : j;
     __m256i va = _mm256_set1_epi8((char)a), vb = _mm256_set1_epi8((char)b);
-    for (; st <= last && st + far + 32 <= n; st += 32) {
+    for (; st <= last && st + reach + 32 <= n; st += 32) {
         __m256i e = _mm256_and_si256(_mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(t + st + i)), va),
                                      _mm256_cmpeq_epi8(_mm256_loadu_si256((const __m256i *)(t + st + j)), vb));
         uint32_t m = (uint32_t)_mm256_movemask_epi8(e);
@@ -402,7 +402,7 @@ static intnat eq2_avx2(bytes t, intnat st, intnat last, intnat n, intnat i, intn
 intnat cre_eq2_find(value s, intnat at, intnat last, intnat n, intnat i, intnat j, intnat a, intnat b)
 {
     bytes t = TEXT(s);
-    intnat far = i > j ? i : j;
+    intnat reach = i > j ? i : j;
     intnat st = at;
 #if defined(CRE_HAS_TARGETS)
     if (has_avx2()) {
@@ -414,7 +414,7 @@ intnat cre_eq2_find(value s, intnat at, intnat last, intnat n, intnat i, intnat 
 #endif
 #if defined(CRE_X86)
     __m128i va = _mm_set1_epi8((char)a), vb = _mm_set1_epi8((char)b);
-    for (; st <= last && st + far + 16 <= n; st += 16) {
+    for (; st <= last && st + reach + 16 <= n; st += 16) {
         __m128i e = _mm_and_si128(_mm_cmpeq_epi8(_mm_loadu_si128((const __m128i *)(t + st + i)), va),
                                   _mm_cmpeq_epi8(_mm_loadu_si128((const __m128i *)(t + st + j)), vb));
         int m = _mm_movemask_epi8(e);
@@ -425,7 +425,7 @@ intnat cre_eq2_find(value s, intnat at, intnat last, intnat n, intnat i, intnat 
     }
 #elif defined(CRE_NEON)
     uint8x16_t va = vdupq_n_u8((uint8_t)a), vb = vdupq_n_u8((uint8_t)b);
-    for (; st <= last && st + far + 16 <= n; st += 16) {
+    for (; st <= last && st + reach + 16 <= n; st += 16) {
         uint64_t m = neon_mask(vandq_u8(vceqq_u8(vld1q_u8(t + st + i), va), vceqq_u8(vld1q_u8(t + st + j), vb)));
         if (m) {
             intnat hit = st + (CRE_CTZ64(m) >> 2);
@@ -433,7 +433,7 @@ intnat cre_eq2_find(value s, intnat at, intnat last, intnat n, intnat i, intnat 
         }
     }
 #endif
-    for (; st <= last && st + far < n; st++)
+    for (; st <= last && st + reach < n; st++)
         if (t[st + i] == a && t[st + j] == b) return st;
     return -1;
 }
