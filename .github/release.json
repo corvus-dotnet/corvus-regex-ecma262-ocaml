@@ -1,0 +1,36 @@
+{
+  "packages": [
+    {
+      "name": "corvus-regex-ecma262-ocaml",
+      "tag": "v",
+      "stampedTag": true,
+      "nextVersion": "0.1.0",
+      "paths": [
+        "dune-project",
+        "corvus-regex-ecma262.opam",
+        "corvus-regex-ecma262.opam.template",
+        "src/"
+      ],
+      "stamp": [
+        {
+          "file": "dune-project",
+          "placeholder": "(version 0.0.0)",
+          "with": "(version {version})",
+          "count": 1
+        },
+        {
+          "file": "corvus-regex-ecma262.opam",
+          "placeholder": "version: \"0.0.0\"",
+          "with": "version: \"{version}\"",
+          "count": 1
+        },
+        {
+          "file": "src/corvus_regex_ecma262.ml",
+          "placeholder": "let version = \"0.0.0\"",
+          "with": "let version = \"{version}\"",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

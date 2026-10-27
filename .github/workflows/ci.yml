@@ -1,0 +1,153 @@
+# The tests, the generated tables and the ECMA-262 test data, with OCaml 4.14 (the library's floor) and 5.5 on Linux,
+# 5.5 on macOS (arm64), Windows and Linux on arm64, and the compilers opam-repository's CI tests every package on (flambda
+# and no-flat-float-array). The data (github.com/corvus-dotnet/ecma262-regex-test-data) is pinned to a commit; the pass
+# is 0 wrong answers, 0 refusals of a valid pattern, 0 acceptances of an invalid one and 0 matches at their limit, in
+# both encodings.
+name: ci
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+  schedule:
+  - cron: '47 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test (OCaml ${{ matrix.ocaml }}${{ matrix.variant && format(' {0}', matrix.variant) || '' }}, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            ocaml: '4.14'
+          - os: ubuntu-latest
+            ocaml: '5.5'
+          - os: ubuntu-24.04-arm
+            ocaml: '5.5'
+          - os: macos-latest
+            ocaml: '5.5'
+          - os: windows-latest
+            ocaml: '5.5'
+          # Compilers configured as opam-repository's CI tests every package on. Each builds the compiler from source.
+          - os: ubuntu-latest
+            ocaml: '4.14'
+            variant: flambda
+            compiler: ocaml-variants.4.14.4+options,ocaml-option-flambda
+          - os: ubuntu-latest
+            ocaml: '5.5'
+            variant: flambda
+            compiler: ocaml-variants.5.5.1+options,ocaml-option-flambda
+          - os: ubuntu-latest
+            ocaml: '5.5'
+            variant: no-flat-float-array
+            compiler: ocaml-variants.5.5.1+options,ocaml-option-no-flat-float-array
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - name: Check out text files with LF line endings
+      run: git config --global core.autocrlf input
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+    - name: OCaml
+      uses: ocaml/setup-ocaml@93303b622b2522e4411e295f9e77411a24912ac7 # v3.9.0
+      with:
+        ocaml-compiler: ${{ matrix.compiler || matrix.ocaml }}
+        dune-cache: false
+        opam-pin: false
+    - name: dune
+      # The package's only build dependency. The tools need nothing else: str and unix come with the compiler.
+      run: opam install --yes dune
+    - name: OCaml and dune versions
+      run: |
+        opam exec -- ocamlopt -version
+        opam exec -- dune --version
+    - name: Build
+      # The dev profile, in which a warning is an error. The build also writes corvus-regex-ecma262.opam from
+      # dune-project and the template, so on Linux the step fails if the committed file is not what they give.
+      run: |
+        opam exec -- dune build
+        if [ "$RUNNER_OS" = Linux ] && ! git diff --exit-code -- corvus-regex-ecma262.opam; then
+          echo "::error::corvus-regex-ecma262.opam is not what dune-project generates. Run dune build and commit it."
+          exit 1
+        fi
+    - name: The README's example is the one the tests run
+      if: runner.os == 'Linux'
+      run: diff <(sed -n '/^```ocaml$/,/^```$/p' README.md | sed '1d;$d') test/readme/readme_example.ml
+    - name: Test
+      run: opam exec -- dune test --force
+    - name: Test with the memory of failed places from the first step
+      if: runner.os == 'Linux'
+      run: opam exec -- dune test --force
+      env:
+        CORVUS_REGEX_MEMO_FROM_THE_START: '1'
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      # The Unicode tables and the properties of strings are written from the Rust crate's, at the version this engine
+      # ports.
+      if: runner.os == 'Linux' && matrix.variant == ''
+      with:
+        repository: corvus-dotnet/corvus-regex-ecma262-rs
+        ref: f38cece52777ab7e1e8a5e68d609dcad76b35574
+        path: corvus-regex-ecma262-rs
+        persist-credentials: false
+    - name: The generated tables are current
+      if: runner.os == 'Linux' && matrix.variant == ''
+      shell: pwsh
+      run: |
+        ./tools/unicode/gen-ucd-tables.ps1 -CrateTables corvus-regex-ecma262-rs/corvus-regex-ecma262/src/tables_gen.rs -Check
+        ./tools/unicode/gen-strings.ps1 -CrateStrings corvus-regex-ecma262-rs/corvus-regex-ecma262/src/strings_gen.rs -Check
+    - name: The version is stamped
+      # What a release does before it tags (tools/release/stamp.ps1), with a tag no release has, so that a moved or
+      # renamed placeholder fails here and not in a release.
+      if: runner.os == 'Linux' && matrix.variant == ''
+      shell: pwsh
+      run: |
+        ./tools/release/stamp.ps1 -Tag v99.98.97
+        if (-not (Select-String -Path src/corvus_regex_ecma262.ml -SimpleMatch 'let version = "99.98.97"' -Quiet)) {
+          throw 'the version was not stamped'
+        }
+        git checkout -- dune-project corvus-regex-ecma262.opam src/corvus_regex_ecma262.ml
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        repository: corvus-dotnet/ecma262-regex-test-data
+        ref: cff0860b7ebc5eb9c801eb9f8cec9d5398688ff2
+        path: ecma262-regex-test-data
+        persist-credentials: false
+    - name: Run the ECMA-262 test data
+      run: |
+        opam exec -- dune build --profile release ./tools/dataset/run.exe
+        ./_build/default/tools/dataset/run.exe ecma262-regex-test-data/data wrong-cases.tsv
+    - name: Run the ECMA-262 test data with the memory of failed places from the first step
+      if: runner.os == 'Linux' && matrix.variant == ''
+      run: ./_build/default/tools/dataset/run.exe ecma262-regex-test-data/data wrong-cases-memo.tsv
+      env:
+        CORVUS_REGEX_MEMO_FROM_THE_START: '1'
+    - name: Keep the wrong cases
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: wrong-cases-${{ matrix.os }}-${{ matrix.ocaml }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}
+        path: wrong-cases*.tsv
+
+  gate:
+    # The one check of this workflow that the ruleset of main requires: it passes when every job above passed (or was
+    # skipped), so a job added here is required with no change to the ruleset.
+    name: CI gate
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Every job passed
+      env:
+        RESULTS: ${{ toJSON(needs.*.result) }}
+      run: |
+        echo "$RESULTS"
+        if echo "$RESULTS" | grep -qE '"(failure|cancelled)"'; then exit 1; fi

@@ -1,0 +1,5 @@
+; The example of the README, run as a test.
+
+(test
+ (name readme_example)
+ (libraries corvus-regex-ecma262))

@@ -1,0 +1,86 @@
+# corvus-regex-ecma262-ocaml
+
+Regular expressions with the grammar and the answers of ECMA-262, the `RegExp` of JavaScript, for OCaml (4.14 and
+later, 64-bit).
+
+- Every flag: `d`, `g`, `i`, `m`, `s`, `u`, `v` and `y`, with the grammar of each. Without `u` or `v` a pattern is
+  read by the Annex B grammar and matched by UTF-16 code unit, as ECMA-262 matches it; with them, by code point. The
+  `v` flag has nested classes, the difference and the intersection of classes, strings in a class and the seven
+  properties of strings.
+- ECMAScript 2025: lookbehind, named groups (and a name shared between alternatives), modifier groups such as
+  `(?i:...)`, and every Unicode property ECMA-262 lists, from tables of Unicode 17 the library carries, so a pattern
+  answers the same whichever compiler built it.
+- Text as UTF-8 (a `string`, or a checked `utf8_text`, which may be a range of a string, checked once and held with no
+  copy) or as UTF-16 (a `string` of UTF-16LE code units, lone surrogates and all). The function chooses the encoding,
+  and nothing is transcoded. Text that is not UTF-8 is refused, never read as U+FFFD. One matcher serves both
+  encodings: it is written once and compiled for each.
+- The methods of a `RegExp`: `is_match`, `find` (a match with its groups, by number and by name), `matches` (a
+  `Seq.t`), `count`, `replace` (`String.prototype.replace`, with every `$` form of `GetSubstitution`), `replace_all`
+  and `split` (`RegExp.prototype[Symbol.split]`, which puts the groups between the pieces). Positions are 0-based
+  offsets in the text's units, bytes or UTF-16 code units. A match into a `captures` allocates nothing once the
+  working memory has grown.
+- `compile` returns a `result`, and takes a match timeout of its own, so a pattern from outside is tried without an
+  exception and bounded without a global setting.
+- A pattern without a backreference is matched in time proportional to its size times the text. A pattern can be given
+  a match timeout, as a `Regex` of .NET can, which bounds the time and the backtracking memory of every match. With a
+  timeout and the library's limits of pattern size, neither a pattern nor a text from outside can make a program hang.
+- A compiled pattern is shared freely between threads (OCaml 4.14) and domains (OCaml 5).
+- No dependencies beyond the compiler's distribution.
+
+**Compliance.** Over the [ECMA-262 test data](https://github.com/corvus-dotnet/ecma262-regex-test-data) (what V8 says
+about its patterns and texts, test262's patterns and `exec` calls, the global search, `replace` and `split` among them,
+and texts of bytes that are not UTF-8, which it refuses), the library gives every answer right and none wrong, refuses
+no valid pattern, accepts no invalid one and reaches no limit, over UTF-8 and over UTF-16. CI runs the whole data on
+every change, on OCaml 4.14 and 5.5.
+
+It is a port of the Rust crate [corvus-regex-ecma262](https://github.com/corvus-dotnet/corvus-regex-ecma262-rs), and it
+follows the design of the .NET engine [Corvus.Regex.Ecma262](https://github.com/corvus-dotnet/Corvus.Regex.Ecma262).
+
+```ocaml
+module R = Corvus_regex_ecma262
+
+let () =
+  let re = R.compile_exn ~flags:"u" {|(?<year>\d{4})-(?<month>\d{2})|} in
+  assert (R.is_match re "on 2026-10-25");
+  assert (R.replace re "2026-10-25" "$<month>/$<year>" = "10/2026-25");
+  (match R.find re "on 2026-10-25" with
+   | Some m -> assert (R.Match.named m "month" = Some "10" && R.Match.start m = 3)
+   | None -> assert false);
+  (* A pattern from outside: no exception, and a timeout of its own. *)
+  match R.compile ~flags:"u" ~match_timeout:0.1 "[a-z" with
+  | Error e -> print_endline (R.error_message e)
+  | Ok _ -> ()
+```
+
+A match that reaches its limit raises `Match_timeout` or `Match_memory`; text that is not UTF-8 raises
+`Invalid_argument`.
+
+## Status
+
+Not yet released. The parser, the compiler and the matcher are in, over both encodings, and the whole test data passes.
+The search layer of the crate (where a match can start, and the automata) comes next, with its kernels in C, then the
+harness of the central benchmark site and the first release, 0.1.0, to opam-repository.
+
+## Building and testing
+
+```
+dune build
+dune test
+dune build --profile release ./tools/dataset/run.exe
+./_build/default/tools/dataset/run.exe <ecma262-regex-test-data>/data wrong-cases.tsv
+```
+
+`CORVUS_REGEX_MEMO_FROM_THE_START=1` makes every match take its memory of failed places from its first step, which CI
+does for a second run of both. The Unicode tables (`src/ucd_tables.ml` and `src/strings_tables.ml`) are written from
+the Rust crate's by `tools/unicode`, and CI checks they are current.
+
+## Releasing
+
+Every pull request merged into main without the `no_release` label releases the library with the next patch version
+(`.github/workflows/auto-release.yml`, `tools/release`): a `v<version>` tag on a commit of the merge with the version
+written into `dune-project`, `corvus-regex-ecma262.opam` and `src/corvus_regex_ecma262.ml`, which main keeps at 0.0.0.
+A pull request that needs a minor or major version sets `nextVersion` in `.github/release.json`.
+
+## License
+
+Apache 2.0.

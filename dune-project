@@ -23,6 +23,4 @@
   "Regular expressions with the grammar and the answers of ECMA-262, the RegExp of JavaScript: every flag, lookbehind, named groups, modifier groups, Unicode property escapes and the v flag's set notation, matched over UTF-8 or UTF-16 text with no copy, in time proportional to the pattern times the text for a pattern without backreferences. A port of the corvus-regex-ecma262 Rust crate.")
  (depends
   (ocaml
-   (>= 4.14))
-  (dune
-   (>= 3.0))))
+   (>= 4.14))))

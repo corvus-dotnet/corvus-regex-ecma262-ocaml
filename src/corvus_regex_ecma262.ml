@@ -241,8 +241,7 @@ type utf8_text = Units.text
 let utf8_text ?(off = 0) ?len s =
   let len = match len with Some l -> l | None -> String.length s - off in
   if off < 0 || len < 0 || off + len > String.length s then invalid_arg "Corvus_regex_ecma262.utf8_text";
-  let sub = if off = 0 && len = String.length s then s else String.sub s off len in
-  let k = Units.first_invalid_utf8 sub in
+  let k = Units.first_invalid_utf8_range s off len in
   if k >= 0 then Error k else Ok { Units.s; base = off; len }
 
 let utf8_text_exn ?off ?len s =

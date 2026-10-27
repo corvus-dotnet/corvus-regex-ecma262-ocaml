@@ -1,3 +1,5 @@
-(executable
- (name smoke)
+; The tests of the API.
+
+(test
+ (name test_engine)
  (libraries corvus-regex-ecma262))

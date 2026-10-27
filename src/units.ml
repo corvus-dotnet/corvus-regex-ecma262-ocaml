@@ -84,15 +84,22 @@ let decode_last_bytes s start stop =
     end
   end
 
-(* Whether a string is UTF-8, and the offset of its first byte that is not, or -1. *)
-let first_invalid_utf8 s =
-  let n = String.length s in
-  let at = ref 0 and bad = ref (-1) in
-  while !bad < 0 && !at < n do
-    let p = decode_bytes s !at n in
-    if rune_of p = rune_error && width_of p = 1 then bad := !at else at := !at + width_of p
+(* The offset from off of the first byte of s.[off] to s.[off + len - 1] that is not UTF-8, or -1 when they are all
+   UTF-8. The ASCII bytes are passed eight at a time. *)
+let first_invalid_utf8_range s off len =
+  let stop = off + len in
+  let at = ref off and bad = ref (-1) in
+  while !bad < 0 && !at < stop do
+    if !at + 8 <= stop && Int64.logand (String.get_int64_ne s !at) 0x8080808080808080L = 0L then at := !at + 8
+    else begin
+      let p = decode_bytes s !at stop in
+      if rune_of p = rune_error && width_of p = 1 then bad := !at - off else at := !at + width_of p
+    end
   done;
   !bad
+
+(* The offset of the first byte of a string that is not UTF-8, or -1 when it is UTF-8. *)
+let first_invalid_utf8 s = first_invalid_utf8_range s 0 (String.length s)
 
 (* UTF-8 text. *)
 module Units8 = struct
