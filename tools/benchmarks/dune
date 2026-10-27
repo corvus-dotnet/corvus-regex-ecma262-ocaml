@@ -1,9 +1,11 @@
-; The Industry harness (run.sh), built only where re and pcre2 are installed (the image, Dockerfile): the package and
-; its tests need neither.
+; The Industry harness (run.sh), built only in the harness profile (dune build --profile harness, as
+; tools/benchmarks/build.sh and the image build it), where re and pcre2 are installed: the package and its tests need
+; neither. A profile other than dev takes dune's release settings.
 
 (executable
  (name industry)
- (optional)
+ (enabled_if
+  (= %{profile} harness))
  (libraries corvus-regex-ecma262 re pcre2 unix))
 
 (rule
