@@ -874,7 +874,7 @@ let first_find (pr : Prog.t) (t : Units.text) at pass_pairs =
         let s = t.s and base = t.base and n = t.len in
         if f.fcount = 1 then rel base (Kernels.index_byte1 s (base + at) (base + n) f.a)
         else if f.fcount = 2 then rel base (Kernels.index_byte2 s (base + at) (base + n) f.a f.b)
-        else if f.fcount <= 4 then rel base (Kernels.index_byte4 s (base + at) (base + n) f.a f.b f.c f.d)
+        else if f.fcount <= 4 then rel base (Kernels.index_byte4 s (base + at) (base + n) (Kernels.pack4 f.a f.b f.c f.d))
         else begin
           (* More than four first bytes are a class (a word's letters, which the next word starts with a byte or two
              on): the next four bytes by the table, before a vector search is set up. *)
@@ -918,7 +918,7 @@ let run_end_of (s : Search.t) (t : Units.text) at =
             let f =
               if count = 1 then Kernels.index_byte1 s (base + at) (base + n) a
               else if count = 2 then Kernels.index_byte2 s (base + at) (base + n) a b
-              else Kernels.index_byte4 s (base + at) (base + n) a b c c
+              else Kernels.index_byte4 s (base + at) (base + n) (Kernels.pack4 a b c c)
             in
             if f < 0 then n else f - base
           end
@@ -930,7 +930,7 @@ let run_end_of (s : Search.t) (t : Units.text) at =
             let s = t.s and base = t.base and n = t.len in
             let j = ref at and result = ref (-1) in
             while !result < 0 do
-              let q = Kernels.index_byte4 s (base + !j) (base + n) 10 13 0xE2 0xE2 in
+              let q = Kernels.index_byte4 s (base + !j) (base + n) (Kernels.pack4 10 13 0xE2 0xE2) in
               if q < 0 then result := n
               else begin
                 let q = q - base in

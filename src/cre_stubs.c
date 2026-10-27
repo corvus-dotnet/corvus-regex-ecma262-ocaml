@@ -187,8 +187,11 @@ value cre_index_byte2_byte(value s, value from, value n, value a, value b)
 }
 
 /* The first position in [from, n) whose byte is one of a, b, c and d (which may repeat), or -1. */
-intnat cre_index_byte4(value s, intnat from, intnat n, intnat a, intnat b, intnat c, intnat d)
+intnat cre_index_byte4(value s, intnat from, intnat n, intnat abcd)
 {
+    /* The four bytes come packed in one argument (Kernels.pack4), so that the call passes four arguments, all in
+       registers, and none on the stack. */
+    intnat a = abcd & 0xFF, b = (abcd >> 8) & 0xFF, c = (abcd >> 16) & 0xFF, d = (abcd >> 24) & 0xFF;
     bytes t = TEXT(s);
     intnat k = from;
 #if defined(CRE_X86)
@@ -216,10 +219,9 @@ intnat cre_index_byte4(value s, intnat from, intnat n, intnat a, intnat b, intna
     return -1;
 }
 
-value cre_index_byte4_byte(value *argv, int argn)
+value cre_index_byte4_byte(value s, value from, value n, value abcd)
 {
-    (void)argn;
-    return Val_long(cre_index_byte4(argv[0], ARG(1), ARG(2), ARG(3), ARG(4), ARG(5), ARG(6)));
+    return Val_long(cre_index_byte4(s, Long_val(from), Long_val(n), Long_val(abcd)));
 }
 
 /* The first position in [from, n) whose byte is in one of nr ranges (one to four), or -1. ranges holds each range as

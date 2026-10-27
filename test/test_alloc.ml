@@ -74,7 +74,7 @@ let cases =
     (* The searches for where a match starts: a literal, several (packed over UTF-16), the case forms, the windows
        with the reverse automaton, the search after loops, the forward automaton with the skip window, and the shapes
        answered without the matcher. *)
-    "letters"; ""; "year|month|text|letters"; ""; "the"; "i"; "year.{0,25}month|month.{0,25}year"; "";
+    "letters"; ""; "year|month|text|letters"; ""; "more letters|the month"; ""; "the"; "i"; "year.{0,25}month|month.{0,25}year"; "";
     "\\s[a-z]{0,12}ers\\s"; ""; "\\w+\\s+month"; ""; "\\d\\d:?\\d\\d"; ""; ".*"; "s"; "[^\\n]*"; ""; "\\p{L}"; "u" ]
 [@@ocamlformat "disable"]
 

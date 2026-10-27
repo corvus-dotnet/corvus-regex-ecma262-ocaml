@@ -13,17 +13,13 @@ external index_byte2 :
   = "cre_index_byte2_byte" "cre_index_byte2"
 [@@noalloc]
 
-(* The first position in [from, n) whose byte is one of four (which may repeat), or -1. *)
-external index_byte4 :
-  string ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) = "cre_index_byte4_byte" "cre_index_byte4"
+(* The first position in [from, n) whose byte is one of four (which may repeat), packed into one int by pack4, or -1:
+   four arguments, which a call passes in registers. *)
+external index_byte4 : string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged])
+  = "cre_index_byte4_byte" "cre_index_byte4"
 [@@noalloc]
+
+let[@inline] pack4 a b c d = a lor (b lsl 8) lor (c lsl 16) lor (d lsl 24)
 
 (* The first position in [from, n) whose byte is in one of nr ranges, given as a least byte and a width each, or -1. *)
 external index_ranges : string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged])
