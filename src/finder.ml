@@ -134,11 +134,25 @@ let starts_with s at end_ lit =
   let len = String.length lit in
   if at < 0 || end_ - at < len then false
   else begin
-    let k = ref 0 in
-    while !k < len && String.unsafe_get s (at + !k) = String.unsafe_get lit !k do
-      incr k
-    done;
-    !k = len
+    if len < 8 then begin
+      let k = ref 0 in
+      while !k < len && String.unsafe_get s (at + !k) = String.unsafe_get lit !k do
+        incr k
+      done;
+      !k = len
+    end
+    else begin
+      (* A long literal eight bytes at a time (an unboxed load on a 64-bit compiler), then the rest a byte at a time. *)
+      let k = ref 0 and same = ref true in
+      while !same && !k + 8 <= len do
+        if Int64.equal (String.get_int64_ne s (at + !k)) (String.get_int64_ne lit !k) then k := !k + 8
+        else same := false
+      done;
+      while !same && !k < len do
+        if String.unsafe_get s (at + !k) = String.unsafe_get lit !k then incr k else same := false
+      done;
+      !same
+    end
   end
 
 (* A set of bytes as 256 booleans in a string, a byte '\001' for a member. *)
