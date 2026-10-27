@@ -4,5 +4,31 @@
 (library
  (name corvus_regex_ecma262)
  (public_name corvus-regex-ecma262)
+ (foreign_stubs
+  (language c)
+  (names cre_stubs)
+  (flags (:standard -O2)))
  (ocamlopt_flags (:standard -O3 -inline 200))
  (flags (:standard -w +a-4-9-40-41-42-44-45-70)))
+
+; The matcher is written once (vm.ml.in) and compiled for each encoding.
+
+(rule
+ (targets vm8.ml)
+ (deps vm.ml.in)
+ (action
+  (with-stdout-to
+   vm8.ml
+   (progn
+    (echo "module T = Units.Units8\n\n")
+    (cat vm.ml.in)))))
+
+(rule
+ (targets vm16.ml)
+ (deps vm.ml.in)
+ (action
+  (with-stdout-to
+   vm16.ml
+   (progn
+    (echo "module T = Units.Units16\n\n")
+    (cat vm.ml.in)))))

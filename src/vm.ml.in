@@ -1,0 +1,725 @@
+(* The backtracking matcher (vm.rs of the Rust crate), written once for both encodings. dune writes vm8.ml and vm16.ml
+   from this file, each starting with the module T of its encoding (Units.Units8 or Units.Units16), so that every read
+   of the text is a direct call the compiler inlines, as the crate's matcher is generic over its text and compiled for
+   each. *)
+
+open Compile
+open Vm_state
+
+let[@inline] rune_of p = p lsr 3
+let[@inline] width_of p = p land 7
+
+(* Whether a way can go on from the position (see Compile.quick). *)
+let[@inline] allows (q : quick) (t : Units.text) pos =
+  if pos >= t.len then q.end_
+  else if q.mid then true
+  else begin
+    let c = T.get t pos in
+    if c < 0x80 then quick_has q c else q.other
+  end
+
+let[@inline] set_of (i : inst) = match i.set with Some s -> s | None -> invalid_arg "a set instruction has a class"
+
+(* The width of the character at the position when the instruction's character or class matches it, and 0 otherwise.
+   The character is a code unit with units set. *)
+let one (i : inst) (t : Units.text) at units =
+  if at >= t.len then 0
+  else begin
+    let c = T.get t at in
+    let p = if c < 0x80 then Units.pack c 1 else T.read t at units in
+    let r = rune_of p in
+    let ok = match i.set with Some set -> Charset.contains set r | None -> r = i.r in
+    if ok then width_of p else 0
+  end
+
+(* The last position in [lo, hi) whose byte is one of the bytes of back, or -1 (memrchr of one to three bytes). *)
+let last_of (t : Units.text) lo hi back =
+  let k = ref (hi - 1) and found = ref (-1) in
+  while !found < 0 && !k >= lo do
+    if String.contains back (String.unsafe_get t.s (t.base + !k)) then found := !k else decr k
+  done;
+  !found
+
+(* Reports whether the program matches at the position start. It keeps its choices on the explicit stack of st, so the
+   depth of the search is bounded by memory and not by the stack of the thread. When it fails, every group and counter
+   is back to the value it had on entry. It counts its steps, and when a check says the match has reached a limit it
+   returns false with the reason in st.stop. *)
+let run_on (prog : program) (st : Vm_state.t) (t : Units.text) start =
+  let insts = prog.insts and quick = prog.quick in
+  (* The text is matched by UTF-16 code unit (see Units). *)
+  let units = prog.units in
+  let len = t.len in
+  let pc = ref 0 and pos = ref start in
+  let steps = ref st.steps in
+  (* Whether the match has taken the memory of failed places into use. *)
+  let memo = ref st.memo_on in
+  (* 0 while running, 1 when it has matched, 2 when it has failed. *)
+  let result = ref 0 in
+  while !result = 0 do
+    decr steps;
+    if !steps < 0 && not (check st st.sp) then begin
+      st.steps <- 0;
+      result := 2
+    end
+    else begin
+      if !steps < 0 then begin
+        steps := check_every;
+        memo := st.memo_on
+      end;
+      let i = Array.unsafe_get insts !pc in
+      let ok =
+        match i.op with
+        | Char_ ->
+            if !pos < len then begin
+              let c = T.get t !pos in
+              if c < 0x80 then
+                if c = i.r then begin
+                  incr pos;
+                  incr pc;
+                  true
+                end
+                else false
+              else begin
+                let p = T.read t !pos units in
+                if rune_of p = i.r then begin
+                  pos := !pos + width_of p;
+                  incr pc;
+                  true
+                end
+                else false
+              end
+            end
+            else false
+        | Set_ ->
+            if !pos < len then begin
+              let set = set_of i in
+              let c = T.get t !pos in
+              if c < 0x80 then
+                if Charset.has_ascii set c then begin
+                  incr pos;
+                  incr pc;
+                  true
+                end
+                else false
+              else begin
+                let p = T.read t !pos units in
+                if Charset.contains set (rune_of p) then begin
+                  pos := !pos + width_of p;
+                  incr pc;
+                  true
+                end
+                else false
+              end
+            end
+            else false
+        | Lit ->
+            let lit = T.lit_of i.lit i.lit16 in
+            if T.lit_at t !pos lit then begin
+              pos := !pos + T.lit_units lit;
+              incr pc;
+              true
+            end
+            else false
+        | Char_back | Set_back ->
+            if !pos > 0 then begin
+              let c = T.get t (!pos - 1) in
+              let p = if c < 0x80 then Units.pack c 1 else T.read_last t !pos units in
+              let r = rune_of p in
+              if if i.op = Char_back then r = i.r else Charset.contains (set_of i) r then begin
+                pos := !pos - width_of p;
+                incr pc;
+                true
+              end
+              else false
+            end
+            else false
+        | Fail -> false
+        | Bol_ ->
+            if !pos = 0 then begin
+              incr pc;
+              true
+            end
+            else false
+        | Eol_ ->
+            if !pos = len then begin
+              incr pc;
+              true
+            end
+            else false
+        | Word_boundary_ | Not_word_boundary_ ->
+            let before = !pos > 0 && Units.is_word_unit (T.get t (!pos - 1)) in
+            let after = !pos < len && Units.is_word_unit (T.get t !pos) in
+            if before <> after = (i.op = Word_boundary_) then begin
+              incr pc;
+              true
+            end
+            else false
+        | Line_start_ ->
+            if !pos = 0 || T.line_terminator_before t !pos then begin
+              incr pc;
+              true
+            end
+            else false
+        | Line_end_ ->
+            if !pos = len || T.line_terminator_at t !pos then begin
+              incr pc;
+              true
+            end
+            else false
+        | Word_boundary_fold | Not_word_boundary_fold ->
+            let before = !pos > 0 && Fold.is_fold_word_rune (rune_of (T.decode_last t !pos)) in
+            let after = !pos < len && Fold.is_fold_word_rune (rune_of (T.decode t !pos)) in
+            if before <> after = (i.op = Word_boundary_fold) then begin
+              incr pc;
+              true
+            end
+            else false
+        | Jmp ->
+            pc := i.x;
+            true
+        | Split ->
+            (* A place from which every way has failed before fails at once. The mark is under whatever comes of this
+               place, a choice or not, so that the place is remembered when it has all failed. *)
+            let seen =
+              if !memo && i.m <> 0 then begin
+                let idx = memo_index prog st i.m !pos in
+                if memo_get st idx then true
+                else begin
+                  if st.sp < max_mark_depth then push st e_mark 0 idx 0;
+                  false
+                end
+              end
+              else false
+            in
+            if seen then false
+            else if not (allows (Array.unsafe_get quick i.y) t !pos) then
+              (* A way the next character rules out is not taken, and no choice is kept for it. *)
+              if not (allows (Array.unsafe_get quick i.x) t !pos) then false
+              else begin
+                pc := i.x;
+                true
+              end
+            else if not (allows (Array.unsafe_get quick i.x) t !pos) then begin
+              pc := i.y;
+              true
+            end
+            else begin
+              push st e_choice i.y !pos 0;
+              pc := i.x;
+              true
+            end
+        | Save_tmp ->
+            let a = i.a in
+            push st e_tmp a st.tmp.(a) 0;
+            st.tmp.(a) <- !pos;
+            incr pc;
+            true
+        | Capture ->
+            let a = i.a in
+            push st e_cap a st.caps.(2 * a) st.caps.((2 * a) + 1);
+            if i.flag then begin
+              st.caps.(2 * a) <- !pos;
+              st.caps.((2 * a) + 1) <- st.tmp.(a)
+            end
+            else begin
+              st.caps.(2 * a) <- st.tmp.(a);
+              st.caps.((2 * a) + 1) <- !pos
+            end;
+            incr pc;
+            true
+        | Clear ->
+            steps := !steps - (i.b - i.a);
+            for g = i.a to i.b do
+              if st.caps.(2 * g) <> none then begin
+                push st e_cap g st.caps.(2 * g) st.caps.((2 * g) + 1);
+                st.caps.(2 * g) <- none;
+                st.caps.((2 * g) + 1) <- none
+              end
+            done;
+            incr pc;
+            true
+        | Backref_ ->
+            (* A group that has not taken part matches the empty string. *)
+            let a = i.a in
+            let from = st.caps.(2 * a) and to_ = st.caps.((2 * a) + 1) in
+            if from = none then begin
+              incr pc;
+              true
+            end
+            else begin
+              let n = to_ - from in
+              if len - !pos >= n && T.equal t !pos from n && T.whole t !pos (!pos + n) then begin
+                steps := !steps - (n lsr 3);
+                pos := !pos + n;
+                incr pc;
+                true
+              end
+              else false
+            end
+        | Backref_back ->
+            let a = i.a in
+            let from = st.caps.(2 * a) and to_ = st.caps.((2 * a) + 1) in
+            if from = none then begin
+              incr pc;
+              true
+            end
+            else begin
+              let n = to_ - from in
+              if !pos >= n && T.equal t (!pos - n) from n && T.whole t (!pos - n) !pos then begin
+                steps := !steps - (n lsr 3);
+                pos := !pos - n;
+                incr pc;
+                true
+              end
+              else false
+            end
+        | Backref_fold | Backref_units ->
+            (* A character at a time: to fold case, or because a group matched by code unit can begin or end between
+               the halves of a character, where its units do not say what it holds. *)
+            let a = i.a in
+            let from = ref st.caps.(2 * a) and to_ = st.caps.((2 * a) + 1) in
+            if !from = none then begin
+              incr pc;
+              true
+            end
+            else begin
+              steps := !steps - ((to_ - !from) lsr 3);
+              let at = ref !pos and good = ref true in
+              while !from < to_ && !good do
+                let pw = T.read t !from units in
+                from := !from + width_of pw;
+                if !at >= len then good := false
+                else begin
+                  let pg = T.read t !at units in
+                  at := !at + width_of pg;
+                  let want = rune_of pw and got = rune_of pg in
+                  good :=
+                    got = want
+                    || (i.op = Backref_fold && Fold.canonicalize got i.flag = Fold.canonicalize want i.flag)
+                end
+              done;
+              if !good then begin
+                pos := !at;
+                incr pc;
+                true
+              end
+              else false
+            end
+        | Backref_fold_back | Backref_units_back ->
+            let a = i.a in
+            let from = st.caps.(2 * a) and to_ = ref st.caps.((2 * a) + 1) in
+            if from = none then begin
+              incr pc;
+              true
+            end
+            else begin
+              steps := !steps - ((!to_ - from) lsr 3);
+              let at = ref !pos and good = ref true in
+              while from < !to_ && !good do
+                let pw = T.read_last t !to_ units in
+                to_ := !to_ - width_of pw;
+                if !at = 0 then good := false
+                else begin
+                  let pg = T.read_last t !at units in
+                  at := !at - width_of pg;
+                  let want = rune_of pw and got = rune_of pg in
+                  good :=
+                    got = want
+                    || (i.op = Backref_fold_back && Fold.canonicalize got i.flag = Fold.canonicalize want i.flag)
+                end
+              done;
+              if !good then begin
+                pos := !at;
+                incr pc;
+                true
+              end
+              else false
+            end
+        | Look_ ->
+            (* What follows a lookaround starts where the lookaround does, and so does the body of a lookahead. *)
+            if allows (Array.unsafe_get quick !pc) t !pos then begin
+              push st (if i.flag then e_look_neg else e_look) i.x !pos 0;
+              incr pc;
+              true
+            end
+            else false
+        | Look_ok ->
+            (* The body matched. A lookaround is atomic, so the choices made inside it are dropped. The undo entries
+               stay, because the groups it set remain set until something below this point is retried. *)
+            let s = st.stack in
+            let f = ref (st.sp - 1) in
+            while s.(4 * !f) <> e_look do
+              decr f
+            done;
+            pos := s.((4 * !f) + 2);
+            let keep = ref !f in
+            for k = !f + 1 to st.sp - 1 do
+              if s.(4 * k) >= e_tmp then begin
+                Array.blit s (4 * k) s (4 * !keep) 4;
+                incr keep
+              end
+            done;
+            st.sp <- !keep;
+            incr pc;
+            true
+        | Look_fail ->
+            (* The body of a negative lookaround matched, so the lookaround fails and everything it did is undone. *)
+            let fin = ref false in
+            while (not !fin) && st.sp > 0 do
+              let e = st.sp - 1 in
+              st.sp <- e;
+              if st.stack.(4 * e) = e_look_neg then fin := true else undo st e
+            done;
+            false
+        | Rep ->
+            let at = ref !pos and n = ref 0 and floor = ref !pos in
+            (match i.set with
+            | Some set ->
+                let fin = ref false in
+                while (not !fin) && !n <> i.max && !at < len do
+                  let c = T.get t !at in
+                  if c < 0x80 then
+                    if not (Charset.has_ascii set c) then fin := true
+                    else begin
+                      incr at;
+                      incr n;
+                      if !n = i.min then floor := !at
+                    end
+                  else begin
+                    let p = T.read t !at units in
+                    if not (Charset.contains set (rune_of p)) then fin := true
+                    else begin
+                      at := !at + width_of p;
+                      incr n;
+                      if !n = i.min then floor := !at
+                    end
+                  end
+                done
+            | None ->
+                let fin = ref false in
+                while (not !fin) && !n <> i.max && !at < len do
+                  let c = T.get t !at in
+                  let p = if c < 0x80 then Units.pack c 1 else T.read t !at units in
+                  if rune_of p <> i.r then fin := true
+                  else begin
+                    at := !at + width_of p;
+                    incr n;
+                    if !n = i.min then floor := !at
+                  end
+                done);
+            steps := !steps - ((!at - !pos) lsr 3);
+            if !n >= i.min then begin
+              let seen =
+                if !memo && i.m <> 0 then begin
+                  let idx = memo_index prog st i.m !at in
+                  if memo_get st idx then true
+                  else begin
+                    if !at = !floor && st.sp < max_mark_depth then push st e_mark 0 idx 0;
+                    false
+                  end
+                end
+                else false
+              in
+              if seen then begin
+                (* What follows the loop has failed from here before. The loop gives a character back. *)
+                if !at > !floor then push st e_rep (!pc + 1) !at !floor;
+                false
+              end
+              else begin
+                if !at > !floor then push st e_rep (!pc + 1) !at !floor;
+                pos := !at;
+                incr pc;
+                true
+              end
+            end
+            else false
+        | Rep_lazy ->
+            let at = ref !pos and n = ref 0 and fin = ref false in
+            while (not !fin) && !n < i.min do
+              let w = one i t !at units in
+              if w = 0 then fin := true
+              else begin
+                at := !at + w;
+                incr n
+              end
+            done;
+            steps := !steps - (!n lsr 3);
+            if !n = i.min then begin
+              let seen =
+                if !memo && i.m <> 0 then begin
+                  let idx = memo_index prog st i.m !at in
+                  if memo_get st idx then true
+                  else begin
+                    if !n = i.max && st.sp < max_mark_depth then push st e_mark 0 idx 0;
+                    false
+                  end
+                end
+                else false
+              in
+              if seen then begin
+                (* What follows the loop has failed from here before. The loop takes one more character. *)
+                if !n <> i.max then push st e_rep_lazy !pc !at !n;
+                false
+              end
+              else begin
+                if !n <> i.max then push st e_rep_lazy !pc !at !n;
+                pos := !at;
+                incr pc;
+                true
+              end
+            end
+            else false
+        | Loop_init ->
+            let a = i.a in
+            push st e_counter a st.counts.(2 * a) st.counts.((2 * a) + 1);
+            st.counts.(2 * a) <- 0;
+            st.counts.((2 * a) + 1) <- none;
+            incr pc;
+            true
+        | Loop ->
+            let a = i.a in
+            let n = st.counts.(2 * a) in
+            let min = i.min
+            and need = if T.utf8 then i.need else i.need16
+            and left = len - !pos
+            and iter = if T.utf8 then i.iter else i.iter16 in
+            if
+              (* Fewer units are left than any way from here to a match consumes: what follows the loop, and the
+                 iterations it has still to make. *)
+              left < need || (n < min && iter <> 0 && left - need < (min - n) * iter)
+            then false
+            else if
+              (* Once the minimum is met, ECMA-262 rejects an iteration that consumed nothing. That is what stops a
+                 loop over a body that can be empty. *)
+              n > min && !pos = st.counts.((2 * a) + 1)
+            then false
+            else if n < min then begin
+              incr pc;
+              true
+            end
+            else if i.max >= 0 && n >= i.max then begin
+              pc := i.x;
+              true
+            end
+            else begin
+              (* The loop may be left or entered from here. A place from which both have failed before fails at once. *)
+              let seen =
+                if !memo && i.m <> 0 then begin
+                  let idx = memo_index prog st i.m !pos in
+                  if memo_get st idx then true
+                  else begin
+                    if st.sp < max_mark_depth then push st e_mark 0 idx 0;
+                    false
+                  end
+                end
+                else false
+              in
+              if seen then false
+              else begin
+                if not (allows (Array.unsafe_get quick i.x) t !pos) then
+                  (* The next character rules out leaving the loop, so there is no choice. *)
+                  incr pc
+                else if not (allows (Array.unsafe_get quick (!pc + 1)) t !pos) then pc := i.x
+                else if i.flag then begin
+                  push st e_choice (!pc + 1) !pos 0;
+                  pc := i.x
+                end
+                else begin
+                  push st e_choice i.x !pos 0;
+                  incr pc
+                end;
+                true
+              end
+            end
+        | Loop_iter ->
+            let a = i.a in
+            push st e_counter a st.counts.(2 * a) st.counts.((2 * a) + 1);
+            st.counts.(2 * a) <- st.counts.(2 * a) + 1;
+            st.counts.((2 * a) + 1) <- !pos;
+            incr pc;
+            true
+        | Match ->
+            st.steps <- !steps;
+            st.end_ <- !pos;
+            result := 1;
+            true
+      in
+      if (not ok) && !result = 0 then begin
+        (* The instruction failed. Take up the most recent choice, undoing what was recorded since. *)
+        let resumed = ref false in
+        while (not !resumed) && !result = 0 do
+          if st.sp = 0 then begin
+            st.steps <- !steps;
+            result := 2
+          end
+          else begin
+            let top = st.sp - 1 in
+            let s = st.stack in
+            let k = 4 * top in
+            let kind = s.(k) and epc = s.(k + 1) and epos = s.(k + 2) and ea = s.(k + 3) in
+            if kind = e_choice then begin
+              pc := epc;
+              pos := epos;
+              st.sp <- top;
+              resumed := true
+            end
+            else if kind = e_rep then begin
+              (* What followed the loop from the position it stood at has failed. *)
+              let rep = insts.(epc - 1) in
+              let marked = !memo && rep.m <> 0 in
+              if marked then memo_set st (memo_index prog st rep.m epos);
+              (* Give back the last character taken. The characters between a and pos were decoded going forward, and
+                 decoding the last of them going backward finds the same boundary. *)
+              let at = ref (epos - T.give_back t ea epos units) in
+              if T.utf8 && rep.back <> "" && !at > ea && not (allows (Array.unsafe_get quick epc) t !at) then begin
+                (* What follows the loop can only start with one of a few ASCII bytes: the last of them before here is
+                   found, and the positions after it are passed over at once. *)
+                let found = last_of t ea !at rep.back in
+                at := if found < 0 then ea else found
+              end;
+              s.(k + 2) <- !at;
+              pc := epc;
+              pos := !at;
+              let last = !at <= ea in
+              (* A position from which what follows the loop cannot go on is passed over, and so is one from which it
+                 has failed before. *)
+              let pass = ref (not (allows (Array.unsafe_get quick !pc) t !pos)) in
+              let kept = ref false in
+              if marked && not !pass then begin
+                let idx = memo_index prog st rep.m !pos in
+                if memo_get st idx then pass := true
+                else if last then begin
+                  (* The loop has nothing more to give back. The entry stays to note this last way. *)
+                  s.(k) <- e_mark;
+                  s.(k + 1) <- 0;
+                  s.(k + 2) <- idx;
+                  s.(k + 3) <- 0;
+                  kept := true;
+                  resumed := true
+                end
+              end;
+              if not !kept then begin
+                if last then st.sp <- top;
+                if !pass then decr steps else resumed := true
+              end
+            end
+            else if kind = e_rep_lazy then begin
+              (* What followed the loop from the position it stood at has failed. *)
+              let rep = insts.(epc) in
+              let marked = !memo && rep.m <> 0 in
+              if marked then memo_set st (memo_index prog st rep.m epos);
+              let w = one rep t epos units in
+              if w = 0 then st.sp <- top
+              else begin
+                let at = epos + w and taken = ea + 1 in
+                s.(k + 2) <- at;
+                s.(k + 3) <- taken;
+                pc := epc + 1;
+                pos := at;
+                let last = taken = rep.max in
+                let handled = ref false in
+                if marked then begin
+                  let idx = memo_index prog st rep.m !pos in
+                  if memo_get st idx then begin
+                    if last then st.sp <- top;
+                    decr steps;
+                    handled := true
+                  end
+                  else if last then begin
+                    s.(k) <- e_mark;
+                    s.(k + 1) <- 0;
+                    s.(k + 2) <- idx;
+                    s.(k + 3) <- 0;
+                    handled := true;
+                    resumed := true
+                  end
+                end;
+                if not !handled then begin
+                  if last then st.sp <- top;
+                  resumed := true
+                end
+              end
+            end
+            else if kind = e_mark then begin
+              (* Every way from a memo point has failed. *)
+              memo_set st epos;
+              st.sp <- top
+            end
+            else if kind = e_look then
+              (* The body of a positive lookaround has no way left to match. *)
+              st.sp <- top
+            else if kind = e_look_neg then begin
+              (* The body of a negative lookaround has no way to match, so the lookaround holds. *)
+              pc := epc;
+              pos := epos;
+              st.sp <- top;
+              resumed := true
+            end
+            else begin
+              st.sp <- top;
+              undo st top
+            end
+          end
+        done
+      end
+    end
+  done;
+  !result = 1
+
+(* Whether the program matches at the position start (see run_on). *)
+let run prog st t start =
+  st.sp <- 0;
+  run_on prog st t start
+
+(* Whether a start passes the first set. *)
+let[@inline] first_allows (prog : program) (t : Units.text) at =
+  match prog.first with
+  | None -> true
+  | Some first ->
+      if at >= t.len then false
+      else begin
+        let c = T.get t at in
+        if c < 0x80 then Charset.has_ascii first c else Charset.contains first (rune_of (T.read t at prog.units))
+      end
+
+(* The search that tries every start its first set allows, from start, for a match of at least need units: where the
+   match starts (its end in st.end_), or no_match. *)
+let scan (prog : program) st (t : Units.text) start need =
+  let len = t.len and units = prog.units in
+  let at = ref start and found = ref no_match and fin = ref false in
+  while not !fin do
+    if len - !at < need then fin := true
+    else if !at = len then begin
+      if prog.first = None && run prog st t !at then found := !at;
+      fin := true
+    end
+    else begin
+      let c = T.get t !at in
+      let p = if c < 0x80 then Units.pack c 1 else T.read t !at units in
+      if first_allows prog t !at && run prog st t !at then begin
+        found := !at;
+        fin := true
+      end
+      else if st.stop <> stop_none then fin := true
+      else at := !at + width_of p
+    end
+  done;
+  !found
+
+(* The first match at or after start (at start alone with sticky): where it starts, its end in st.end_, or no_match. *)
+let search (prog : program) st (t : Units.text) start sticky =
+  let len = t.len in
+  let need = if T.utf8 then prog.need else prog.need16 in
+  if start > len || len - start < need then no_match
+  else if sticky || prog.anchored then
+    if prog.anchored && start > 0 then no_match else if run prog st t start then start else no_match
+  else scan prog st t start need
+
+(* The match from start with the memory st and a limit in nanoseconds (0 for none): where it starts, with its end in
+   st.end_ and its groups in st.caps; or no_match, stopped_time or stopped_memory. *)
+let match_with (prog : program) st (t : Units.text) start sticky limit =
+  reset st prog t.len limit;
+  let found = search prog st t start sticky in
+  let stop = st.stop in
+  trim st;
+  if stop = stop_time then stopped_time else if stop = stop_memory then stopped_memory else found

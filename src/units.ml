@@ -206,6 +206,34 @@ module Units8 = struct
     if pos >= t.len then pos + 1
     else if unicode then pos + width_of (decode_bytes t.s (t.base + pos) (t.base + t.len))
     else pos + width_of (unit_at t pos)
+
+  (* Whether the n units at a and at b are the same. *)
+  let equal t a b n =
+    let s = t.s and a = t.base + a and b = t.base + b in
+    let k = ref 0 in
+    while !k < n && String.unsafe_get s (a + !k) = String.unsafe_get s (b + !k) do
+      incr k
+    done;
+    !k = n
+
+  (* The literal's units in this encoding: lit is the UTF-8 form and lit16 the UTF-16LE form. *)
+  let[@inline] lit_of lit _ = lit
+
+  (* The number of units of a literal in this encoding. *)
+  let[@inline] lit_units lit = String.length lit
+
+  (* Whether the literal (in this encoding) is at the position, before the end of the text. *)
+  let lit_at t pos lit =
+    let n = String.length lit in
+    if t.len - pos < n then false
+    else begin
+      let s = t.s and at = t.base + pos in
+      let k = ref 0 in
+      while !k < n && String.unsafe_get s (at + !k) = String.unsafe_get lit !k do
+        incr k
+      done;
+      !k = n
+    end
 end
 
 (* UTF-16 text, which may hold lone surrogates: code units of UTF-16LE, two bytes each. *)
@@ -256,4 +284,27 @@ module Units16 = struct
 
   let advance t pos unicode =
     if pos >= t.len then pos + 1 else if unicode then pos + width_of (decode t pos) else pos + 1
+
+  let equal t a b n =
+    let s = t.s and a = t.base + (2 * a) and b = t.base + (2 * b) and n = 2 * n in
+    let k = ref 0 in
+    while !k < n && String.unsafe_get s (a + !k) = String.unsafe_get s (b + !k) do
+      incr k
+    done;
+    !k = n
+
+  let[@inline] lit_of _ lit16 = lit16
+  let[@inline] lit_units lit = String.length lit / 2
+
+  let lit_at t pos lit =
+    let n = String.length lit in
+    if 2 * (t.len - pos) < n then false
+    else begin
+      let s = t.s and at = t.base + (2 * pos) in
+      let k = ref 0 in
+      while !k < n && String.unsafe_get s (at + !k) = String.unsafe_get lit !k do
+        incr k
+      done;
+      !k = n
+    end
 end

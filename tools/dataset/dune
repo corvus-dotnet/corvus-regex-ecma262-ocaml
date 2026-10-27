@@ -1,0 +1,5 @@
+; The runner of the ECMA-262 test data.
+
+(executable
+ (name run)
+ (libraries corvus-regex-ecma262 str unix))
