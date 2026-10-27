@@ -4,3 +4,4 @@ wrong-cases*.tsv
 .merlin
 .idea/
 .vscode/
+tools/benchmarks/versions.env
