@@ -121,3 +121,20 @@ on the heap up to it. On each stack it answers the 964 probes as the crate's doe
 590 refused, no fault, on OCaml 4.14 and 5.5 on Linux. The deep probes (the groups, lookarounds, quantified groups and
 classes nested to the limit, one past it and far past it) are answered the same on stacks of 1 MB and of 512 KB. A
 stack that overflows raises `Stack_overflow` or ends the process, which the probe counts as a fault either way.
+
+## The rows still slower than V8
+
+In a measured run of the harness (cores 0 to 11 of a pinned host, the interleaved protocol, 3 rounds of 0.7 s), 3 of
+the 57 Industry workloads are slower than V8 over UTF-8, each counting what V8 counts. The first two are within the
+spread the same run gives V8 itself (up to 9%); Holmes is not:
+
+| Workload | This port (µs) | V8 (µs) | Ratio | Where the time goes |
+|---|--:|--:|--:|---|
+| `zqj` | 5.8 | 5.7 | 1.02 | The search for the z over 595 KB of text. |
+| `the\s+\w+` | 573.5 | 547.0 | 1.05 | The search for the t, then the run of the word after it. |
+| `Holmes` | 17.9 | 15.8 | 1.14 | The search for the H, whose 1,278 places in the text each end a search for 461 matches. |
+
+Over UTF-16, 11 are slower, most of them literal and run searches over English text, which V8 holds as one byte a
+character: it reads half the bytes this port reads in the code units of the text. `zqj` reads 1.2 MB in 18 µs, about
+as fast as the cache delivers it. The slowest are `zqj` (3.17), `IPv4 addresses` (2.14), `Holmes` (2.08), `The` (1.43),
+`the\s+\w+` (1.37), `\p{Lu}` (1.37) and `Twain` (1.28).
