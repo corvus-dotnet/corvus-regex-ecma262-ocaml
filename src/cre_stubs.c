@@ -705,6 +705,76 @@ value cre_index_unit16_byte(value s, value base, value from, value n, value v)
     return Val_long(cre_index_unit16(s, Long_val(base), Long_val(from), Long_val(n), Long_val(v)));
 }
 
+/* The first unit at or after from and before n of UTF-16LE text from the byte base that is in one of nr ranges (1 to
+   8), given as 16-bit little-endian pairs of a least unit and a width (hi - lo), or -1. With AVX2 or NEON, sixteen or
+   eight units a step: a unit x is in a range where x - lo, unsigned, is at most the width. */
+#if defined(CRE_HAS_TARGETS)
+CRE_TARGET("avx2")
+static intnat index_units16_avx2(bytes t, intnat k, intnat n, bytes r, intnat nr, int *found)
+{
+    __m256i lo[8], w[8];
+    for (int q = 0; q < nr; q++) {
+        lo[q] = _mm256_set1_epi16((short)(r[4 * q] | (r[4 * q + 1] << 8)));
+        w[q] = _mm256_set1_epi16((short)(r[4 * q + 2] | (r[4 * q + 3] << 8)));
+    }
+    for (; k + 16 <= n; k += 16) {
+        __m256i x = _mm256_loadu_si256((const __m256i *)(t + 2 * k)), any = _mm256_setzero_si256();
+        for (int q = 0; q < nr; q++) {
+            __m256i d = _mm256_sub_epi16(x, lo[q]);
+            any = _mm256_or_si256(any, _mm256_cmpeq_epi16(_mm256_min_epu16(d, w[q]), d));
+        }
+        uint32_t m = (uint32_t)_mm256_movemask_epi8(any);
+        if (m) {
+            *found = 1;
+            return k + (CRE_CTZ32(m) >> 1);
+        }
+    }
+    *found = 0;
+    return k;
+}
+#endif
+
+intnat cre_index_units16(value s, intnat base, intnat from, intnat n, value ranges, intnat nr)
+{
+    bytes t = TEXT(s) + base, r = TEXT(ranges);
+    intnat k = from;
+#if defined(CRE_HAS_TARGETS)
+    if (has_avx2()) {
+        int found;
+        k = index_units16_avx2(t, k, n, r, nr, &found);
+        if (found) return k;
+    }
+#elif defined(CRE_NEON)
+    {
+        uint16x8_t lo[8], w[8];
+        for (int q = 0; q < nr; q++) {
+            lo[q] = vdupq_n_u16((uint16_t)(r[4 * q] | (r[4 * q + 1] << 8)));
+            w[q] = vdupq_n_u16((uint16_t)(r[4 * q + 2] | (r[4 * q + 3] << 8)));
+        }
+        for (; k + 8 <= n; k += 8) {
+            uint16x8_t x = vreinterpretq_u16_u8(vld1q_u8(t + 2 * k)), any = vdupq_n_u16(0);
+            for (int q = 0; q < nr; q++) any = vorrq_u16(any, vcleq_u16(vsubq_u16(x, lo[q]), w[q]));
+            uint64_t m = neon_mask(vreinterpretq_u8_u16(any));
+            if (m) return k + (CRE_CTZ64(m) >> 3);
+        }
+    }
+#endif
+    for (; k < n; k++) {
+        uint16_t x = (uint16_t)(t[2 * k] | (t[2 * k + 1] << 8));
+        for (int q = 0; q < nr; q++) {
+            uint16_t l = (uint16_t)(r[4 * q] | (r[4 * q + 1] << 8)), wd = (uint16_t)(r[4 * q + 2] | (r[4 * q + 3] << 8));
+            if ((uint16_t)(x - l) <= wd) return k;
+        }
+    }
+    return -1;
+}
+
+value cre_index_units16_byte(value *argv, int argn)
+{
+    (void)argn;
+    return Val_long(cre_index_units16(argv[0], ARG(1), ARG(2), ARG(3), argv[4], ARG(5)));
+}
+
 /* Writes the low byte of each of count units of UTF-16LE text from unit from (units from the byte base) into dst, the
    packed text the packed search reads. */
 intnat cre_pack_low(value s, intnat base, intnat from, intnat count, value dst)

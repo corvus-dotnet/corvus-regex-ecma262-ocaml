@@ -87,6 +87,13 @@ external index_unit16 :
   = "cre_index_unit16_byte" "cre_index_unit16"
 [@@noalloc]
 
+(* The first unit at or after from and before n of UTF-16LE text from the byte base that is in one of nr ranges (1 to 8),
+   given as 16-bit little-endian pairs of a least unit and a width, or -1. *)
+external index_units16 :
+  string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged])
+  = "cre_index_units16_byte" "cre_index_units16"
+[@@noalloc]
+
 (* Writes the low byte of count units of UTF-16LE text from unit from (from the byte base) into dst. *)
 external pack_low : string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> Bytes.t -> (int[@untagged])
   = "cre_pack_low_byte" "cre_pack_low"

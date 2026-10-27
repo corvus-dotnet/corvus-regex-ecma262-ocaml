@@ -485,7 +485,35 @@ let test_ascii_run_end () =
       (Printf.sprintf "ascii_run_end from %d over %d bytes" from n)
   done
 
+(* The search for ranges of UTF-16 units (Kernels.index_units16) finds what a plain loop finds: random texts and up to
+   eight random ranges, every start. *)
+let test_index_units16 () =
+  seed := 0x9E3779B9;
+  for _ = 1 to 300 do
+    let n = next () mod 120 in
+    let units = Array.init n (fun _ -> if next () mod 4 = 0 then next () mod 0x10000 else 0x40 + (next () mod 64)) in
+    let b = Bytes.create (2 * n) in
+    Array.iteri (fun k u -> Bytes.set_uint16_le b (2 * k) u) units;
+    let nr = 1 + (next () mod 8) in
+    let pairs = Array.init nr (fun _ -> let lo = next () mod 0x10000 in (lo, min 0xFFFF (lo + (next () mod 40)))) in
+    let r = Bytes.create (4 * nr) in
+    Array.iteri
+      (fun q (lo, hi) ->
+        Bytes.set_uint16_le r (4 * q) lo;
+        Bytes.set_uint16_le r ((4 * q) + 2) (hi - lo))
+      pairs;
+    let from = if n = 0 then 0 else next () mod n in
+    let k = ref from and found = ref (-1) in
+    while !found < 0 && !k < n do
+      if Array.exists (fun (lo, hi) -> units.(!k) >= lo && units.(!k) <= hi) pairs then found := !k else incr k
+    done;
+    check
+      (Kernels.index_units16 (Bytes.to_string b) 0 from n (Bytes.to_string r) nr = !found)
+      (Printf.sprintf "index_units16 from %d over %d units" from n)
+  done
+
 let () =
+  test_index_units16 ();
   test_ascii_run_end ();
   test_index_run ();
   test_searches_find_what_every_position_finds ();
