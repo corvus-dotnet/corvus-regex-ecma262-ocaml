@@ -118,6 +118,11 @@ type t = {
   mutable width : int;
   mutable checks : int;
   mutable points : int;
+  (* Where an occurrence of the search's literals ends (out.(0)), a place an automaton reached (out.(1)), the starts an
+     occurrence allows (out.(2) and out.(3), see starts_before in the matcher), and the buffer the packed search over
+     UTF-16 packs units into, made on the first search that wants it. *)
+  out : int array;
+  mutable pack : Bytes.t;
 }
 
 let create () =
@@ -138,6 +143,8 @@ let create () =
     width = 0;
     checks = 0;
     points = 0;
+    out = [| 0; 0; 0; 0 |];
+    pack = Bytes.empty;
   }
 
 (* Takes the memory of failed places into use when the match has made enough steps to pay for it. *)
@@ -224,11 +231,13 @@ let memo_index (prog : Compile.program) st m pos =
 
 (* Readies the memory for a match of the program over a text of len units, with a limit in nanoseconds (0 for none). *)
 let reset st (prog : Compile.program) len limit =
+  (* The arrays only grow, so that matches of patterns of different sizes that share the memory (a domain's) do not
+     make new ones; a match reads the first of each that its program needs. *)
   let ng = 2 * prog.groups in
-  if Array.length st.caps <> ng then st.caps <- Array.make ng none else Array.fill st.caps 0 ng none;
-  if Array.length st.tmp <> prog.groups then st.tmp <- Array.make prog.groups 0;
+  if Array.length st.caps < ng then st.caps <- Array.make ng none else Array.fill st.caps 0 ng none;
+  if Array.length st.tmp < prog.groups then st.tmp <- Array.make prog.groups 0;
   let nl = 2 * prog.loops in
-  if Array.length st.counts <> nl then st.counts <- Array.make nl 0 else Array.fill st.counts 0 nl 0;
+  if Array.length st.counts < nl then st.counts <- Array.make nl 0 else Array.fill st.counts 0 nl 0;
   st.limit <- limit;
   st.deadline <- -1;
   st.steps <- check_every;

@@ -1,5 +1,16 @@
-; The tests of the API.
+; The tests of the API, and of the searches against trying every position.
 
 (test
  (name test_engine)
+ (modules test_engine)
+ (libraries corvus-regex-ecma262))
+
+(test
+ (name test_search)
+ (modules test_search)
+ (libraries corvus-regex-ecma262))
+
+(test
+ (name test_alloc)
+ (modules test_alloc)
  (libraries corvus-regex-ecma262))

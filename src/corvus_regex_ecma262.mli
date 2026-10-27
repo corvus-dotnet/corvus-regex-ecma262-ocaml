@@ -30,8 +30,8 @@
     {1 Threads and domains}
 
     A compiled pattern may be used by any number of threads and domains at once. A match needs working memory, which it
-    takes from the pattern when no other match holds it (and makes its own for that match when one does), or from a
-    {!scratch} the caller gives, which a caller that matches from several threads or domains keeps one of for each. *)
+    takes from its domain on OCaml 5 (each domain keeps one), or from the pattern when no other match holds it; a match
+    that finds both held makes its own. {!exec_into} takes the working memory its {!captures} keep. *)
 
 (** {1 Compiling} *)
 
@@ -162,19 +162,17 @@ val utf8_text_exn : ?off:int -> ?len:int -> string -> utf8_text
 
     Each function searches from [pos] (0 by default; with the [y] flag a match must start there), over UTF-8 for the
     plain form, a {!utf8_text} for the [_text] form, and UTF-16LE for the [_utf16] form. A position inside a character
-    means that character with the [u] or [v] flag, as [RegExpBuiltinExec] reads it. *)
+    means that character with the [u] or [v] flag, as [RegExpBuiltinExec] reads it.
 
-(** Working memory for matches, which a caller that matches from several threads or domains can keep one of for each,
-    so that no match allocates and none waits for another. A scratch may be used by one match at a time. *)
-type scratch
+    {!is_match}, {!count} and {!exec_into} allocate nothing once the working memory has grown, but for the two words of
+    the option that carries a [pos] given to {!is_match}. A string is checked as UTF-8 and made a text the first time it
+    is matched; matched again it is not checked again. *)
 
-val create_scratch : unit -> scratch
+(** Whether the pattern matches anywhere from [pos]. *)
+val is_match : ?pos:int -> t -> string -> bool
 
-(** Whether the pattern matches anywhere from [pos]. It allocates nothing once the working memory has grown. *)
-val is_match : ?scratch:scratch -> ?pos:int -> t -> string -> bool
-
-val is_match_text : ?scratch:scratch -> ?pos:int -> t -> utf8_text -> bool
-val is_match_utf16 : ?scratch:scratch -> ?pos:int -> t -> string -> bool
+val is_match_text : ?pos:int -> t -> utf8_text -> bool
+val is_match_utf16 : ?pos:int -> t -> string -> bool
 
 (** A match: where it and each of its groups start and end, and what each holds. *)
 module Match : sig
@@ -203,10 +201,10 @@ module Match : sig
 end
 
 (** The first match from [pos], or [None]. *)
-val find : ?scratch:scratch -> ?pos:int -> t -> string -> Match.t option
+val find : ?pos:int -> t -> string -> Match.t option
 
-val find_text : ?scratch:scratch -> ?pos:int -> t -> utf8_text -> Match.t option
-val find_utf16 : ?scratch:scratch -> ?pos:int -> t -> string -> Match.t option
+val find_text : ?pos:int -> t -> utf8_text -> Match.t option
+val find_utf16 : ?pos:int -> t -> string -> Match.t option
 
 (** The matches of a global search, which moves on past an empty match by a character (a code point with the [u] or
     [v] flag, a code unit without). *)
@@ -214,11 +212,11 @@ val matches : t -> string -> Match.t Seq.t
 
 val matches_utf16 : t -> string -> Match.t Seq.t
 
-(** The number of matches of a global search. It allocates nothing once the working memory has grown. *)
-val count : ?scratch:scratch -> t -> string -> int
+(** The number of matches of a global search. *)
+val count : t -> string -> int
 
-val count_text : ?scratch:scratch -> t -> utf8_text -> int
-val count_utf16 : ?scratch:scratch -> t -> string -> int
+val count_text : t -> utf8_text -> int
+val count_utf16 : t -> string -> int
 
 (** Where each group of a match is, written by {!exec_into} without allocating. *)
 type captures
@@ -226,12 +224,13 @@ type captures
 (** Captures for the pattern's groups. *)
 val captures : t -> captures
 
-(** Matches into the captures: whether there is a match from [pos]. It allocates nothing once the working memory has
-    grown and the captures have the pattern's size. *)
-val exec_into : ?scratch:scratch -> ?pos:int -> t -> captures -> string -> bool
+(** Matches into the captures: whether there is a match from [pos]. The captures keep the working memory of the matches
+    into them, so captures are for one match at a time (one for each thread or domain that matches). [pos] is not
+    optional, so that a global search made of these calls makes no option for it. *)
+val exec_into : t -> captures -> pos:int -> string -> bool
 
-val exec_into_text : ?scratch:scratch -> ?pos:int -> t -> captures -> utf8_text -> bool
-val exec_into_utf16 : ?scratch:scratch -> ?pos:int -> t -> captures -> string -> bool
+val exec_into_text : t -> captures -> pos:int -> utf8_text -> bool
+val exec_into_utf16 : t -> captures -> pos:int -> string -> bool
 
 (** Where group [i] of the last match into the captures starts and ends (0 is the whole match), or [-1] for a group
     that did not take part. *)

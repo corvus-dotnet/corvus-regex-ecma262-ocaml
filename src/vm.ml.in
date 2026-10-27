@@ -36,7 +36,11 @@ let one (i : inst) (t : Units.text) at units =
 let last_of (t : Units.text) lo hi back =
   let k = ref (hi - 1) and found = ref (-1) in
   while !found < 0 && !k >= lo do
-    if String.contains back (String.unsafe_get t.s (t.base + !k)) then found := !k else decr k
+    let c = String.unsafe_get t.s (t.base + !k) and j = ref 0 in
+    while !j < String.length back && String.unsafe_get back !j <> c do
+      incr j
+    done;
+    if !j < String.length back then found := !k else decr k
   done;
   !found
 
@@ -666,60 +670,861 @@ let run_on (prog : program) (st : Vm_state.t) (t : Units.text) start =
   done;
   !result = 1
 
-(* Whether the program matches at the position start (see run_on). *)
-let run prog st t start =
-  st.sp <- 0;
-  run_on prog st t start
+(* The readers of the automata of Adfa. Each loop reads units at positions below the length of the text. *)
+
+(* What the anchored automaton finds where it does not find a match's end: no match starts here, or a unit beyond ASCII
+   was reached and the backtracking matcher decides. *)
+let adfa_none = -1
+let adfa_bail = -2
+
+let[@inline] is_word_unit c = c < 0x80 && Charset.is_word_byte c
+
+(* The start state at start: where the pattern has no boundary or anchor that looks back, the one. *)
+let[@inline] start_index (a : Adfa.anchored) (t : Units.text) start =
+  if not a.context then 0 else if start = 0 then 1 else if is_word_unit (T.get t (start - 1)) then 2 else 0
+
+(* Reads the automaton from the row at: the end of the last match found, or adfa_none or adfa_bail. *)
+let run_dfa (a : Adfa.anchored) (t : Units.text) from at =
+  let fast = a.fast and class_ = a.class_ and len = t.len in
+  let last = ref adfa_none and p = ref from and at = ref at and result = ref adfa_none and fin = ref false in
+  while (not !fin) && !p < len do
+    let c = T.get t !p in
+    if c >= 0x80 then begin
+      result := adfa_bail;
+      fin := true
+    end
+    else begin
+      let tr = Array.unsafe_get fast (!at + Char.code (String.unsafe_get class_ c)) in
+      if tr land Adfa.fast_matched <> 0 then last := !p;
+      at := tr land lnot Adfa.fast_matched;
+      if !at = 0 then begin
+        result := !last;
+        fin := true
+      end
+      else incr p
+    end
+  done;
+  if !fin then !result else if a.at_end.(!at lsr a.shift) then !p else !last
+
+(* Where the match that starts at start ends, or adfa_none where no match starts there, or adfa_bail where a unit beyond
+   ASCII was reached and the backtracking matcher decides. *)
+let find_dfa (a : Adfa.anchored) t start =
+  let s = a.starts.(start_index a t start) in
+  if s = Adfa.dead then adfa_none
+  else (* The state is kept premultiplied by the stride, so a step is one load and an add. *)
+    run_dfa a t start (s lsl a.shift)
+
+(* find_dfa from start where the units from start to from are a prefix whose states rows holds (see Adfa.after). *)
+let find_after_dfa (a : Adfa.anchored) t start from (rows : int array) =
+  let row = rows.(start_index a t start) in
+  if row = 0 then adfa_none else run_dfa a t from row
+
+(* Whether any match starts at start, found at the first place one ends: 1 or 0, or adfa_bail when a unit beyond ASCII
+   is reached first. *)
+let matches_at (a : Adfa.anchored) (t : Units.text) start =
+  let s = a.starts.(start_index a t start) in
+  if s = Adfa.dead then 0
+  else begin
+    let fast = a.fast and class_ = a.class_ and len = t.len in
+    let at = ref (s lsl a.shift) and p = ref start and result = ref (-3) in
+    while !result = -3 && !p < len do
+      let c = T.get t !p in
+      if c >= 0x80 then result := adfa_bail
+      else begin
+        let tr = Array.unsafe_get fast (!at + Char.code (String.unsafe_get class_ c)) in
+        if tr land Adfa.fast_matched <> 0 then result := 1
+        else begin
+          at := tr;
+          if tr = 0 then result := 0 else incr p
+        end
+      end
+    done;
+    if !result <> -3 then !result else if a.at_end.(!at lsr a.shift) then 1 else 0
+  end
+
+(* What scan_dfa found: a match ends at the place; a start state is reached again there first, so that no match starts
+   before it; a unit beyond ASCII is there; or no match ends before the end of the text. *)
+let scan_match = 0
+let scan_idle = 1
+let scan_bail = 2
+let scan_none = 3
+
+(* Reads the forward automaton from a start state at from: what it found (above), with its place in st.out.(1). *)
+let scan_dfa (a : Adfa.anchored) (st : Vm_state.t) (t : Units.text) from =
+  let fast = a.fast and class_ = a.class_ and len = t.len in
+  let row = ref (a.starts.(start_index a t from) lsl a.shift) and p = ref from and result = ref (-1) in
+  while !result < 0 && !p < len do
+    let c = T.get t !p in
+    if c >= 0x80 then result := scan_bail
+    else begin
+      let tr = Array.unsafe_get fast (!row + Char.code (String.unsafe_get class_ c)) in
+      if tr land Adfa.fast_matched <> 0 then result := scan_match
+      else begin
+        row := tr;
+        incr p;
+        if Array.unsafe_get a.start_like (tr lsr a.shift) then result := scan_idle
+      end
+    end
+  done;
+  st.out.(1) <- !p;
+  if !result >= 0 then !result else if a.at_end.(!row lsr a.shift) then scan_match else scan_none
+
+(* The bits of a word of a set of starts: OCaml's ints hold 63, of which 62 are used, so that no shift reaches the
+   sign. *)
+let word_bits = 62
+let word_mask = (1 lsl word_bits) - 1
+
+(* Finds the starts before q, as a set of their distances (bit d of out.(2) and out.(3), the second word from d = 62,
+   is the start q - d), that the terms allow, looking no further back than most units nor before floor; false when a
+   unit beyond ASCII is reached. *)
+let starts_before (r : Adfa.reverse) (st : Vm_state.t) (t : Units.text) q most floor =
+  let m0 = ref (if r.accept_first then 1 else 0) and m1 = ref 0 in
+  let at = ref (1 lsl r.rshift) in
+  let reach = min most (max 0 (q - floor)) in
+  let d = ref 1 and ok = ref true and fin = ref false in
+  while (not !fin) && !d <= reach do
+    let c = T.get t (q - !d) in
+    if c >= 0x80 then begin
+      ok := false;
+      fin := true
+    end
+    else begin
+      let tr = Array.unsafe_get r.rfast (!at + Char.code (String.unsafe_get r.rclass c)) in
+      if tr = 0 then fin := true
+      else begin
+        if tr land Adfa.fast_matched <> 0 then
+          if !d < word_bits then m0 := !m0 lor (1 lsl !d) else m1 := !m1 lor (1 lsl (!d - word_bits));
+        at := tr land lnot Adfa.fast_matched;
+        incr d
+      end
+    end
+  done;
+  st.out.(2) <- !m0;
+  st.out.(3) <- !m1;
+  !ok
+
+(* The first place at or after at that the window does not rule out: one unit read rules out the starts of a window
+   none of whose positions it can be. *)
+let skip_ahead (s : Adfa.skip) (t : Units.text) at =
+  let n = t.len and hi = s.hi and len = s.len in
+  if T.utf8 && s.nranges > 0 && len <= 64 && at + hi < n then begin
+    (* Over UTF-8, the first run of bytes the window holds as long as the window, from at's place lo (index_run): a
+       start has a byte the window holds at each place from lo to hi. *)
+    let lo = hi - len + 1 in
+    let q = Kernels.index_run t.s (t.base + at + lo) (t.base + n) s.ranges s.nranges len in
+    if q >= 0 then q - t.base - lo else at + ((n - hi - at + len - 1) / len * len)
+  end
+  else begin
+    let at = ref at in
+    (* at + hi is below the length of the text at each read. *)
+    while !at + hi < n && not (Adfa.skip_hit s (T.get t (!at + hi))) do
+      at := !at + len
+    done;
+    !at
+  end
+
+(* Whether the program matches at the position start: by the anchored automaton where the program has one and the
+   text it reads is ASCII, and otherwise by the matcher (see run_on). *)
+let run (pr : Prog.t) st t start =
+  let decided =
+    match pr.anchored_dfa with
+    | None -> adfa_bail
+    | Some a ->
+        let at = find_dfa a t start in
+        if at >= 0 then st.end_ <- at;
+        at
+  in
+  if decided >= 0 then true
+  else if decided = adfa_none then false
+  else begin
+    st.sp <- 0;
+    run_on pr.p st t start
+  end
+
+(* The parts of the searches that differ between the encodings beyond the unit. *)
+
+(* Whether the position is between the halves of a surrogate pair, which UTF-8 has no position for. *)
+let[@inline] mid_pair (t : Units.text) at =
+  (not T.utf8)
+  && at > 0
+  && at < t.len
+  &&
+  let c = T.get t at in
+  c >= 0xDC00 && c <= 0xDFFF
+  &&
+  let b = T.get t (at - 1) in
+  b >= 0xD800 && b <= 0xDBFF
+
+(* A position a kernel found, from the start of the text's string to the start of the text; -1 stays. *)
+let[@inline] rel base q = if q < 0 then -1 else q - base
+
+(* The first position at or after at whose unit a member of the first set can start with, or -1; at itself where the
+   search has no first bytes or units. With the u or v flag the trail half of a pair is not a character a match can
+   start at, unless pass_pairs (the scan, which passes over it itself, so that the skip is run from the place after
+   it). *)
+let first_find (pr : Prog.t) (t : Units.text) at pass_pairs =
+  if T.utf8 then
+    match pr.search.first_bytes with
+    | None -> at
+    | Some f ->
+        let s = t.s and base = t.base and n = t.len in
+        if f.fcount = 1 then rel base (Kernels.index_byte1 s (base + at) (base + n) f.a)
+        else if f.fcount = 2 then rel base (Kernels.index_byte2 s (base + at) (base + n) f.a f.b)
+        else if f.fcount <= 4 then rel base (Kernels.index_byte4 s (base + at) (base + n) f.a f.b f.c f.d)
+        else begin
+          (* More than four first bytes are a class (a word's letters, which the next word starts with a byte or two
+             on): the next four bytes by the table, before a vector search is set up. *)
+          let e = min n (at + 4) and k = ref at and found = ref (-1) in
+          while !found < 0 && !k < e do
+            if String.unsafe_get f.table (Char.code (String.unsafe_get s (base + !k))) <> '\000' then found := !k
+            else incr k
+          done;
+          if !found >= 0 then !found
+          else if f.nranges > 0 then rel base (Kernels.index_ranges s (base + e) (base + n) f.ranges f.nranges)
+          else begin
+            let k = ref e in
+            while !found < 0 && !k < n do
+              if String.unsafe_get f.table (Char.code (String.unsafe_get s (base + !k))) <> '\000' then found := !k
+              else incr k
+            done;
+            !found
+          end
+        end
+  else
+    match pr.search.first_units with
+    | None -> at
+    | Some fu ->
+        let at = ref at and found = ref (-2) in
+        while !found = -2 do
+          let q = Literals.unit_find fu t !at in
+          if q < 0 || pass_pairs || pr.p.units || not (mid_pair t q) then found := q else at := q + 1
+        done;
+        !found
+
+(* The end of the run of the loop's members that starts at at, or -1 to find it a member at a time. *)
+let run_end_of (s : Search.t) (t : Units.text) at =
+  match s.shape with
+  | Loop (_, _, run_end) -> (
+      match run_end with
+      | Search.Each -> -1
+      | All -> t.len
+      | Stops (count, a, b, c, stops16) ->
+          if T.utf8 then begin
+            let s = t.s and base = t.base and n = t.len in
+            let f =
+              if count = 1 then Kernels.index_byte1 s (base + at) (base + n) a
+              else if count = 2 then Kernels.index_byte2 s (base + at) (base + n) a b
+              else Kernels.index_byte4 s (base + at) (base + n) a b c c
+            in
+            if f < 0 then n else f - base
+          end
+          else
+            let f = Literals.unit_find stops16 t at in
+            if f < 0 then t.len else f
+      | Line stops16 ->
+          if T.utf8 then begin
+            let s = t.s and base = t.base and n = t.len in
+            let j = ref at and result = ref (-1) in
+            while !result < 0 do
+              let q = Kernels.index_byte4 s (base + !j) (base + n) 10 13 0xE2 0xE2 in
+              if q < 0 then result := n
+              else begin
+                let q = q - base in
+                if T.get t q <> 0xE2 || (q + 2 < n && T.get t (q + 1) = 0x80 && T.get t (q + 2) lor 1 = 0xA9) then
+                  result := q
+                else j := q + 1
+              end
+            done;
+            !result
+          end
+          else
+            let f = Literals.unit_find stops16 t at in
+            if f < 0 then t.len else f)
+  | _ -> -1
+
+(* The leftmost occurrence of the literals at or after from: where it starts, with its end in st.out.(0); or -1. *)
+let find_literals (l : Literals.t) (st : Vm_state.t) (t : Units.text) from =
+  if T.utf8 then begin
+    let q = Literals.find8 l t.s (t.base + from) (t.base + t.len) st.out in
+    if q < 0 then -1
+    else begin
+      st.out.(0) <- st.out.(0) - t.base;
+      q - t.base
+    end
+  end
+  else begin
+    if Bytes.length st.pack < Literals.pack_chunk then st.pack <- Bytes.create Literals.pack_chunk;
+    Literals.find16 l t from st.pack st.out
+  end
+
+(* The leftmost occurrence that starts at or after from and at or before last, or -1. *)
+let find_within (l : Literals.t) (st : Vm_state.t) (t : Units.text) from last =
+  if T.utf8 then begin
+    let q = Literals.find_within8 l t.s (t.base + t.len) (t.base + from) (t.base + last) st.out in
+    if q < 0 then -1 else q - t.base
+  end
+  else Literals.find_within16 l t from last
+
+(* Where the match that starts at q ends, for a pattern every match of which starts with the one literal found at q: the
+   anchored automaton goes on after it. Or adfa_none, or adfa_bail where the matcher decides (always over UTF-16, where
+   the literal's states are not known). *)
+let after_find (pr : Prog.t) t q =
+  if not T.utf8 then adfa_bail
+  else
+    match (pr.after_literal, pr.anchored_dfa) with
+    | Some (rows, n), Some a -> find_after_dfa a t q (q + n) rows
+    | _ -> adfa_bail
+
+(* The width of the character at a position before the end. *)
+let[@inline] width_at (pr : Prog.t) (t : Units.text) at =
+  if T.get t at < 0x80 then 1 else width_of (T.read t at pr.p.units)
+
+(* The end of the run of members of the set from at. *)
+let end_of_run (pr : Prog.t) (cs : Charset.t) (t : Units.text) at =
+  let n = t.len and at = ref at and fin = ref false in
+  while (not !fin) && !at < n do
+    let c = T.get t !at in
+    if c < 0x80 then if Charset.has_ascii cs c then incr at else fin := true
+    else begin
+      let p = T.read t !at pr.p.units in
+      if Charset.contains cs (rune_of p) then at := !at + width_of p else fin := true
+    end
+  done;
+  !at
+
+(* The first member of the set at or after at, with its width in st.out.(1), or -1. *)
+let next_member (pr : Prog.t) (cs : Charset.t) st (t : Units.text) at =
+  let at = ref at and found = ref (-2) in
+  while !found = -2 do
+    let q = first_find pr t !at false in
+    if q < 0 || q >= t.len then found := -1
+    else begin
+      let c = T.get t q in
+      if c < 0x80 then
+        if Charset.has_ascii cs c then begin
+          st.out.(1) <- 1;
+          found := q
+        end
+        else at := q + 1
+      else begin
+        let p = T.read t q pr.p.units in
+        if Charset.contains cs (rune_of p) then begin
+          st.out.(1) <- width_of p;
+          found := q
+        end
+        else at := q + width_of p
+      end
+    end
+  done;
+  !found
+
+(* The first match at or after start of the shape of an alternation of literals with forms: its start, with its end in
+   st.end_, or -1. *)
+let forms_match (pr : Prog.t) (literals : Literals.t) (forms : int array array array) st (t : Units.text) start =
+  let next = ref start and found = ref (-2) in
+  while !found = -2 do
+    let q = find_literals literals st t !next in
+    if q < 0 then found := -1
+    else begin
+      (* The automaton compares several alternatives at once where the text is ASCII; one is compared faster as it
+         is. *)
+      let decided =
+        match pr.anchored_dfa with
+        | Some a when Array.length forms > 1 -> find_dfa a t q
+        | _ -> adfa_bail
+      in
+      if decided >= 0 then begin
+        st.end_ <- decided;
+        found := q
+      end
+      else if decided = adfa_none then next := q + width_at pr t q
+      else begin
+        let k = ref 0 in
+        while !found = -2 && !k < Array.length forms do
+          let alt = forms.(!k) in
+          let at = ref q and ok = ref true and j = ref 0 in
+          while !ok && !j < Array.length alt do
+            if !at >= t.len then ok := false
+            else begin
+              let c = T.get t !at in
+              let p = if c < 0x80 then Units.pack c 1 else T.read t !at pr.p.units in
+              let forms = alt.(!j) and r = rune_of p and f = ref 0 in
+              while !f < Array.length forms && Array.unsafe_get forms !f <> r do
+                incr f
+              done;
+              if !f < Array.length forms then begin
+                at := !at + width_of p;
+                incr j
+              end
+              else ok := false
+            end
+          done;
+          if !ok then begin
+            st.end_ <- !at;
+            found := q
+          end;
+          incr k
+        done;
+        if !found = -2 then next := q + width_at pr t q
+      end
+    end
+  done;
+  !found
+
+(* What shape_search gives where the pattern is not of a simple shape: the matcher decides. *)
+let undecided = -4
+
+(* The first match at or after start of a pattern of a simple shape: its start, with its end in st.end_; or no_match,
+   or undecided. *)
+let shape_search (pr : Prog.t) st (t : Units.text) start =
+  let s = pr.search in
+  let need = if T.utf8 then pr.p.need else pr.p.need16 in
+  match s.shape with
+  | No_shape -> undecided
+  | _ when start > t.len || t.len - start < need -> no_match
+  | Literals_only -> (
+      match s.plan with
+      | Windows { literals; _ } ->
+          let q = find_literals literals st t start in
+          if q < 0 then no_match
+          else begin
+            st.end_ <- st.out.(0);
+            q
+          end
+      | _ -> undecided)
+  | Forms forms -> (
+      match s.plan with
+      | Windows { literals; _ } ->
+          let q = forms_match pr literals forms st t start in
+          if q < 0 then no_match else q
+      | _ -> undecided)
+  | Set_shape cs ->
+      let q = next_member pr cs st t start in
+      if q < 0 then no_match
+      else begin
+        st.end_ <- q + st.out.(1);
+        q
+      end
+  | Loop (cs, min, _) ->
+      let from = if min <> 0 then next_member pr cs st t start else start in
+      if from < 0 then no_match
+      else begin
+        let e = run_end_of s t from in
+        st.end_ <- (if e >= 0 then e else end_of_run pr cs t from);
+        from
+      end
 
 (* Whether a start passes the first set. *)
-let[@inline] first_allows (prog : program) (t : Units.text) at =
-  match prog.first with
+let[@inline] first_allows (pr : Prog.t) (t : Units.text) at =
+  match pr.p.first with
   | None -> true
   | Some first ->
       if at >= t.len then false
       else begin
         let c = T.get t at in
-        if c < 0x80 then Charset.has_ascii first c else Charset.contains first (rune_of (T.read t at prog.units))
+        if c < 0x80 then Charset.has_ascii first c else Charset.contains first (rune_of (T.read t at pr.p.units))
       end
 
-(* The search that tries every start its first set allows, from start, for a match of at least need units: where the
-   match starts (its end in st.end_), or no_match. *)
-let scan (prog : program) st (t : Units.text) start need =
-  let len = t.len and units = prog.units in
-  let at = ref start and found = ref no_match and fin = ref false in
-  while not !fin do
-    if len - !at < need then fin := true
-    else if !at = len then begin
-      if prog.first = None && run prog st t !at then found := !at;
-      fin := true
-    end
+(* Whether the program matches at the start, with the reason for stopping in st.stop. *)
+let[@inline] try_at pr st t at = first_allows pr t at && run pr st t at
+
+(* Whether nothing from the occurrence at q on can match, by the check's automaton while it pays. *)
+let rules_out (r : Search.rest_check option) t q =
+  match r with
+  | Some r when Search.pays r ->
+      let out = matches_at r.dfa t q = 0 in
+      Search.count r out;
+      out
+  | _ -> false
+
+(* The position n characters before at, not before floor (the furthest it gets when there are fewer), with the
+   characters it went back over in st.out.(1). *)
+let walk_back (pr : Prog.t) st (t : Units.text) at n floor =
+  let k = ref 0 and at = ref at and fin = ref false in
+  while (not !fin) && !k < n && !at > floor do
+    let w = width_of (T.read_last t !at pr.p.units) in
+    if !at - w < floor then fin := true
     else begin
-      let c = T.get t !at in
-      let p = if c < 0x80 then Units.pack c 1 else T.read t !at units in
-      if first_allows prog t !at && run prog st t !at then begin
-        found := !at;
-        fin := true
-      end
-      else if st.stop <> stop_none then fin := true
-      else at := !at + width_of p
+      at := !at - w;
+      incr k
     end
   done;
-  !found
+  st.out.(1) <- !k;
+  !at
+
+(* Whether every unit from from to before to_ (or the end of the text) is ASCII. *)
+let ascii_run (t : Units.text) from to_ =
+  let to_ = min to_ t.len and k = ref from in
+  while !k < to_ && T.get t !k < 0x80 do
+    incr k
+  done;
+  !k >= to_
+
+let[@inline] lowest_bit x =
+  let k = ref 0 in
+  while (x lsr !k) land 1 = 0 do
+    incr k
+  done;
+  !k
+
+(* What a search gives where it cannot decide: a unit beyond ASCII was reached, for the plain search to be made. *)
+let not_decided = -5
+
+(* search_windows with the terms before the anchors read backwards from each occurrence, so that only the starts they
+   allow are tried: the start found, no_match, or not_decided when a unit beyond ASCII is reached, for the plain search
+   to be made. A start is tried only once no later occurrence could allow an earlier one (it is before the next
+   occurrence's window), so the starts are tried in order across occurrences and the first match is the leftmost. *)
+let search_reverse (pr : Prog.t) literals lo hi reverse rest st (t : Units.text) start need =
+  let len = t.len in
+  (* The starts waiting to be tried, as two words of bits: bit k is the position base + k. *)
+  let p0 = ref 0 and p1 = ref 0 and base = ref start in
+  (* Every start at or before this has been tried, or can no longer be allowed. *)
+  let tried = ref (-1) in
+  let q = ref (find_literals literals st t start) in
+  let result = ref (if !q < 0 then no_match else -6) in
+  while !result = -6 do
+    (* The starts this occurrence's terms allow join those waiting. *)
+    let new_base = max start (!q - hi) in
+    if new_base > !base then begin
+      let shift = new_base - !base in
+      if shift >= 2 * word_bits then begin
+        p0 := 0;
+        p1 := 0
+      end
+      else if shift >= word_bits then begin
+        p0 := !p1 lsr (shift - word_bits);
+        p1 := 0
+      end
+      else begin
+        p0 := (!p0 lsr shift) lor ((!p1 lsl (word_bits - shift)) land word_mask);
+        p1 := !p1 lsr shift
+      end;
+      base := new_base
+    end;
+    (* An occurrence from which nothing can match allows no start. *)
+    let decided =
+      if rules_out rest t !q then begin
+        st.out.(2) <- 0;
+        st.out.(3) <- 0;
+        true
+      end
+      else starts_before reverse st t !q hi start
+    in
+    if not decided then result := not_decided
+    else begin
+      let m0 = ref st.out.(2) and m1 = ref st.out.(3) in
+      (* No start nearer than lo characters. *)
+      if lo >= word_bits then begin
+        m0 := 0;
+        m1 := !m1 land lnot ((1 lsl (lo - word_bits)) - 1)
+      end
+      else if lo > 0 then m0 := !m0 land lnot ((1 lsl lo) - 1);
+      (* Each start the terms allow that is not tried yet waits; the words are read in turn, with no closure, so that
+         the references stay in registers. *)
+      for w = 0 to 1 do
+        let m = ref (if w = 0 then !m0 else !m1) in
+        while !m <> 0 do
+          let bit = lowest_bit !m in
+          m := !m land lnot (1 lsl bit);
+          let at = !q - (bit + (w * word_bits)) in
+          if at >= !base && at > !tried then begin
+            let b = at - !base in
+            if b < word_bits then p0 := !p0 lor (1 lsl b) else p1 := !p1 lor (1 lsl (b - word_bits))
+          end
+        done
+      done;
+      let after = !q + width_at pr t !q in
+      (* The earliest waiting start is tried once no occurrence before it plus the window could allow an earlier one: an
+         occurrence within that reach is taken in first, which looks no further than the reach. *)
+      let taken = ref false in
+      while !result = -6 && (not !taken) && (!p0 lor !p1) <> 0 do
+        let k = if !p0 <> 0 then lowest_bit !p0 else word_bits + lowest_bit !p1 in
+        let at = !base + k in
+        (* The window is hi characters, and the search counts units: the two agree over ASCII alone. Where the reach
+           holds a unit beyond ASCII, an occurrence more than hi units on can be within hi characters and allow an
+           earlier start than this one, so the plain search decides. *)
+        if not (ascii_run t at (at + hi)) then result := not_decided
+        else begin
+          let q2 = if after <= at + hi then find_within literals st t after (at + hi) else -1 in
+          if q2 >= 0 then begin
+            q := q2;
+            taken := true
+          end
+          else begin
+            if k < word_bits then p0 := !p0 land lnot (1 lsl k) else p1 := !p1 land lnot (1 lsl (k - word_bits));
+            tried := at;
+            if len - at < need then result := no_match
+            else if try_at pr st t at then result := at
+            else if st.stop <> stop_none then result := no_match
+          end
+        end
+      done;
+      if !result = -6 && not !taken then begin
+        q := find_literals literals st t after;
+        if !q < 0 then result := no_match
+      end
+    end
+  done;
+  !result
+
+(* The search of a pattern each of whose matches holds one of the literals lo to hi characters after its start: each
+   occurrence opens the window of starts that could reach it, tried in order and never twice. *)
+let search_windows (pr : Prog.t) literals lo hi reverse rest st (t : Units.text) start need =
+  let first =
+    match reverse with
+    | Some r when hi < 2 * word_bits -> search_reverse pr literals lo hi r rest st t start need
+    | _ -> not_decided
+  in
+  if first <> not_decided then first
+  else begin
+    let len = t.len in
+    let next = ref start in
+    (* Every start before this has been tried. *)
+    let untried = ref start in
+    let result = ref (-6) in
+    while !result = -6 do
+      let q = find_literals literals st t !next in
+      if q < 0 then result := no_match
+      else begin
+        next := q + width_at pr t q;
+        if hi = 0 then begin
+          (* Every alternative starts with its literal: the match starts at the occurrence or not at all. *)
+          if len - q < need then result := no_match
+          else begin
+            (* The occurrence is the literal every match starts with: the automaton goes on after it. *)
+            let e = after_find pr t q in
+            if e >= 0 then begin
+              st.end_ <- e;
+              result := q
+            end
+            else if e = adfa_none then ()
+            else if try_at pr st t q then result := q
+            else if st.stop <> stop_none then result := no_match
+          end
+        end
+        else begin
+          let last = walk_back pr st t q lo start in
+          if not (st.out.(1) < lo || last < !untried || rules_out rest t q) then begin
+            let at = ref (walk_back pr st t q hi start) and fin = ref false in
+            while !result = -6 && (not !fin) && !at <= last do
+              if !at >= !untried then
+                if len - !at < need then result := no_match
+                else if try_at pr st t !at then result := !at
+                else if st.stop <> stop_none then result := no_match;
+              if !result = -6 then if !at = len then fin := true else at := !at + width_at pr t !at
+            done;
+            if !at > !untried then untried := !at
+          end
+        end
+      end
+    done;
+    !result
+  end
+
+(* The search of a pattern each of whose matches is runs of the loops' sets, then the literal: the runs before each
+   occurrence are walked back to the earliest start, which is tried. From that start the loops reach every place a
+   later start of the run could, so the later starts fail with it; the occurrence itself is not in the run and may
+   start a match, so it is tried next where every loop may be empty, and is the floor for the walk back from later
+   occurrences otherwise. A start before an occurrence can reach a later one through it (the literal can be in a loop's
+   set), so an occurrence ruled out does not move the floor. *)
+let search_after_loops (pr : Prog.t) literals (sets : Charset.t array) (mins : int array) rest st (t : Units.text)
+    start need =
+  let len = t.len and units = pr.p.units in
+  let next = ref start in
+  (* The floor below which no start is tried again. *)
+  let low = ref start in
+  (* A loop by hand: the library's for_all makes a closure at each call. *)
+  let all_empty = ref true in
+  for k = 0 to Array.length mins - 1 do
+    if mins.(k) <> 0 then all_empty := false
+  done;
+  let all_empty = !all_empty in
+  let nsets = Array.length sets in
+  let result = ref (-6) in
+  while !result = -6 do
+    let q = find_literals literals st t !next in
+    if q < 0 then result := no_match
+    else begin
+      next := q + width_at pr t q;
+      (* A loop that needs a member must have one just before the occurrence: a test of one character, made before the
+         rest is checked. *)
+      let passes =
+        if mins.(nsets - 1) = 1 then
+          q > !low
+          &&
+          let c = T.get t (q - 1) in
+          let r = if c < 0x80 then c else rune_of (T.read_last t q units) in
+          Charset.contains sets.(nsets - 1) r
+        else true
+      in
+      if passes && not (rules_out rest t q) then begin
+        let at = ref q and skip = ref false and k = ref (nsets - 1) in
+        while (not !skip) && !k >= 0 do
+          let run_start = !at and fin = ref false in
+          while (not !fin) && !at > !low do
+            let c = T.get t (!at - 1) in
+            let p = if c < 0x80 then Units.pack c 1 else T.read_last t !at units in
+            let r = rune_of p and w = width_of p in
+            if (not (Charset.contains sets.(!k) r)) || !at - w < !low then fin := true else at := !at - w
+          done;
+          if mins.(!k) = 1 && !at = run_start then skip := true;
+          decr k
+        done;
+        if not !skip then begin
+          let at = !at in
+          if len - at < need then result := no_match
+          else if try_at pr st t at then result := at
+          else if st.stop <> stop_none then result := no_match
+          else begin
+            if at < q then begin
+              (* The occurrence itself (\b[0-9a-f]*ét over "0aét", where the walk back gives 0). *)
+              low := q;
+              if all_empty then
+                if len - q < need then result := no_match
+                else if try_at pr st t q then result := q
+                else if st.stop <> stop_none then result := no_match
+                else low := !next
+            end
+            else low := !next;
+            if !result = -6 && nsets = 1 then begin
+              (* Every occurrence in the rest of the loop's run walks back to the start just tried. *)
+              let e = end_of_run pr sets.(0) t q in
+              if e > !next then next := e
+            end
+          end
+        end
+      end
+    end
+  done;
+  !result
+
+(* What try_starts gives: a start matched, the search is over without one, or the starts ran out; with the place it
+   stopped at (the start that matched, or where the starts ran out) in st.out.(1). *)
+let tried_found = 0
+let tried_over = 1
+let tried_out = 2
+
+(* Tries the starts from at to last in order, as the plain search would. *)
+let try_starts (pr : Prog.t) st (t : Units.text) at last =
+  let len = t.len and result = ref (-1) and at = ref at in
+  while !result < 0 && !at <= last && !at <= len do
+    if (not pr.p.units) && mid_pair t !at then incr at
+    else if !at = len then result := if pr.p.first = None && run pr st t !at then tried_found else tried_over
+    else begin
+      let c = T.get t !at in
+      let p = if c < 0x80 then Units.pack c 1 else T.read t !at pr.p.units in
+      let r = rune_of p and w = width_of p in
+      let allowed = match pr.p.first with None -> true | Some f -> Charset.contains f r in
+      if allowed && run pr st t !at then result := tried_found
+      else if st.stop <> stop_none then result := tried_over
+      else at := !at + w
+    end
+  done;
+  st.out.(1) <- !at;
+  if !result < 0 then tried_out else !result
+
+(* Tries every start from start that the first set allows. *)
+let scan (pr : Prog.t) st (t : Units.text) start need =
+  let len = t.len and s = pr.search in
+  let fwd = match pr.forward with Some f -> Once.get f | None -> None in
+  let at = ref start and result = ref (-6) in
+  while !result = -6 do
+    (match pr.skip with Some sk -> at := skip_ahead sk t !at | None -> ());
+    (* Every match starts with a member of the first set, which starts with one of the first bytes or units. *)
+    at := first_find pr t !at true;
+    if !at < 0 then result := no_match
+    else if (not pr.p.units) && s.first_units <> None && mid_pair t !at then
+      (* With the u or v flag the trail half of a pair is not a character a match can start at; the place after it goes
+         back through the skip. *)
+      incr at
+    else if len - !at < need then result := no_match
+    else if !at = len then result := if pr.p.first = None && run pr st t !at then !at else no_match
+    else begin
+      let c = T.get t !at in
+      let p = if c < 0x80 then Units.pack c 1 else T.read t !at pr.p.units in
+      let r = rune_of p and w = width_of p in
+      if s.leading_word_boundary && !at > 0 && is_word_unit (T.get t (!at - 1)) then begin
+        (* Inside a word, where \b cannot hold: the rest of the word is passed over. *)
+        let first = match pr.p.first with Some f -> f | None -> Charset.make [||] in
+        at := max (!at + w) (end_of_run pr first t !at)
+      end
+      else
+        match fwd with
+        | Some f ->
+            (* One pass of the forward automaton from here says where a match first ends, or that none starts before a
+               place where no thread is alive; only then are starts tried, from here to there. *)
+            let kind = scan_dfa f st t !at in
+            let place = st.out.(1) in
+            if kind = scan_none then result := no_match
+            else if kind = scan_idle then at := place
+            else begin
+              let tried = try_starts pr st t !at place in
+              at := st.out.(1);
+              if tried = tried_found then result := !at else if tried = tried_over then result := no_match
+            end
+        | None ->
+            let allowed = match pr.p.first with None -> true | Some f -> Charset.contains f r in
+            if allowed && run pr st t !at then result := !at
+            else if st.stop <> stop_none then result := no_match
+            else begin
+              match s.skip_run with
+              | Some sr when Charset.contains sr r ->
+                  (* The start failed after its leading loop ate the run from here: every start in the rest of the run
+                     fails the same way. *)
+                  at := max (!at + w) (end_of_run pr sr t (!at + w))
+              | _ -> at := !at + w
+            end
+    end
+  done;
+  !result
 
 (* The first match at or after start (at start alone with sticky): where it starts, its end in st.end_, or no_match. *)
-let search (prog : program) st (t : Units.text) start sticky =
-  let len = t.len in
+let search (pr : Prog.t) st (t : Units.text) start sticky =
+  let len = t.len and prog = pr.p in
   let need = if T.utf8 then prog.need else prog.need16 in
   if start > len || len - start < need then no_match
   else if sticky || prog.anchored then
-    if prog.anchored && start > 0 then no_match else if run prog st t start then start else no_match
-  else scan prog st t start need
+    if prog.anchored && start > 0 then no_match else if run pr st t start then start else no_match
+  else
+    match pr.search.plan with
+    | Windows { literals; lo; hi; reverse; rest } -> search_windows pr literals lo hi reverse rest st t start need
+    | After_loops { literals; sets; mins; rest } -> search_after_loops pr literals sets mins rest st t start need
+    | Scan -> scan pr st t start need
 
 (* The match from start with the memory st and a limit in nanoseconds (0 for none): where it starts, with its end in
-   st.end_ and its groups in st.caps; or no_match, stopped_time or stopped_memory. *)
-let match_with (prog : program) st (t : Units.text) start sticky limit =
-  reset st prog t.len limit;
-  let found = search prog st t start sticky in
-  let stop = st.stop in
-  trim st;
-  if stop = stop_time then stopped_time else if stop = stop_memory then stopped_memory else found
+   st.end_ and its groups in st.caps; or no_match, stopped_time or stopped_memory. A pattern of a simple shape with no
+   group is answered by the search alone, with nothing of the matcher's. *)
+let match_with (pr : Prog.t) st (t : Units.text) start sticky limit =
+  let shaped =
+    if pr.p.groups = 0 && (not sticky) && not pr.p.anchored then shape_search pr st t start else undecided
+  in
+  if shaped <> undecided then shaped
+  else begin
+    reset st pr.p t.len limit;
+    let found = search pr st t start sticky in
+    let stop = st.stop in
+    trim st;
+    if stop = stop_time then stopped_time else if stop = stop_memory then stopped_memory else found
+  end
+
+(* Whether the pattern matches the text, by its automaton over ASCII text (see Dfa): 1 or 0, or -1 when the text is not
+   ASCII, which the automaton does not decide. *)
+let dfa_is_match (d : Dfa.t) (t : Units.text) =
+  let len = t.len in
+  if len = 0 then if d.empty then 1 else 0
+  else if d.start = Dfa.accept then 1
+  else begin
+    let trans = d.trans and class_ = d.class_ and shift = d.shift in
+    let s = ref d.start and p = ref 0 in
+    while !s >= Dfa.first_state && !p < len do
+      let c = T.get t !p in
+      (* A unit beyond ASCII is in class 0. *)
+      let cl = if c < 0x80 then Char.code (String.unsafe_get class_ c) else 0 in
+      s := Char.code (String.unsafe_get trans ((!s lsl shift) lor cl));
+      incr p
+    done;
+    if !s = Dfa.bail then -1
+    else if !s < Dfa.first_state then if !s = Dfa.accept then 1 else 0
+    else if d.at_end.(!s) then 1
+    else 0
+  end

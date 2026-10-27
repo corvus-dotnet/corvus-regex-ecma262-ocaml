@@ -17,8 +17,11 @@ later, 64-bit).
 - The methods of a `RegExp`: `is_match`, `find` (a match with its groups, by number and by name), `matches` (a
   `Seq.t`), `count`, `replace` (`String.prototype.replace`, with every `$` form of `GetSubstitution`), `replace_all`
   and `split` (`RegExp.prototype[Symbol.split]`, which puts the groups between the pieces). Positions are 0-based
-  offsets in the text's units, bytes or UTF-16 code units. A match into a `captures` allocates nothing once the
-  working memory has grown.
+  offsets in the text's units, bytes or UTF-16 code units. `is_match`, `count` and a match into a `captures` allocate
+  nothing once the working memory has grown.
+- The searches of the Rust crate for where a match can start (literals by their rarest bytes, Teddy, the pair search,
+  windows of starts, the anchored, forward and reverse automata), with their kernels in C: SSE2, SSSE3 and AVX2 on
+  x86-64, NEON on arm64, and a scalar fallback on any other processor.
 - `compile` returns a `result`, and takes a match timeout of its own, so a pattern from outside is tried without an
   exception and bounded without a global setting.
 - A pattern without a backreference is matched in time proportional to its size times the text. A pattern can be given
@@ -57,9 +60,9 @@ A match that reaches its limit raises `Match_timeout` or `Match_memory`; text th
 
 ## Status
 
-Not yet released. The parser, the compiler and the matcher are in, over both encodings, and the whole test data passes.
-The search layer of the crate (where a match can start, and the automata) comes next, with its kernels in C, then the
-harness of the central benchmark site and the first release, 0.1.0, to opam-repository.
+Not yet released. The parser, the compiler, the matcher and the search layer are in, over both encodings, and the whole
+test data passes. The harness of the central benchmark site comes next, then the first release, 0.1.0, to
+opam-repository.
 
 ## Building and testing
 
@@ -68,7 +71,13 @@ dune build
 dune test
 dune build --profile release ./tools/dataset/run.exe
 ./_build/default/tools/dataset/run.exe <ecma262-regex-test-data>/data wrong-cases.tsv
+dune build --profile release ./tools/stackprobe/stackprobe.exe
+./tools/stackprobe/run.sh
 ```
+
+`dune test` runs the tests of the API, the tests of the searches (each finds what trying every position finds) and the
+test that a warm match allocates nothing. The stack probe asks about patterns built to overflow the stack, on stacks of
+4 MB and 2 MB (`docs/port-checklist.md`, which also lists every optimisation of the search layer).
 
 `CORVUS_REGEX_MEMO_FROM_THE_START=1` makes every match take its memory of failed places from its first step, which CI
 does for a second run of both. The Unicode tables (`src/ucd_tables.ml` and `src/strings_tables.ml`) are written from

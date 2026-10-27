@@ -384,7 +384,7 @@ let byte_offsets (s : int array) =
 let submatch re text start utf16 =
   let caps = R.captures re in
   let found =
-    if utf16 then R.exec_into_utf16 ~pos:start re caps text else R.exec_into ~pos:start re caps text
+    if utf16 then R.exec_into_utf16 re caps ~pos:start text else R.exec_into re caps ~pos:start text
   in
   if found then Some (Array.init (2 * (R.group_count re + 1)) (fun k -> if k mod 2 = 0 then R.capture_start caps (k / 2) else R.capture_end caps (k / 2)))
   else None

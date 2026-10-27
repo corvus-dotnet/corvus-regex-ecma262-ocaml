@@ -32,3 +32,19 @@
    (progn
     (echo "module T = Units.Units16\n\n")
     (cat vm.ml.in)))))
+
+; The working memory each domain keeps, which only OCaml 5 has domains for.
+
+(rule
+ (targets domain_home.ml)
+ (enabled_if
+  (>= %{ocaml_version} 5.0))
+ (action
+  (copy domain_home.ocaml5.ml domain_home.ml)))
+
+(rule
+ (targets domain_home.ml)
+ (enabled_if
+  (< %{ocaml_version} 5.0))
+ (action
+  (copy domain_home.ocaml4.ml domain_home.ml)))

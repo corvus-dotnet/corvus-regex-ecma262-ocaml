@@ -117,9 +117,12 @@ type t = {
   pattern : string;
   flags : flags;
   (* The program for a match that needs no groups: it records only the groups some backreference names. *)
-  prog : Compile.program;
+  prog : Prog.t;
   (* The program that records every group, built the first time a match asks for the groups. *)
-  caps : Compile.program option Atomic.t;
+  caps : Prog.t option Atomic.t;
+  (* The automaton of the pattern over ASCII text (see Dfa), built on the first match that wants it, for a pattern that
+     needs no backtracking and is small enough to be tried for one; None for any other. *)
+  dfa : Dfa.t option Once.t option;
   group_count : int;
   names : group_name list;
   (* The time a match may take in nanoseconds, or 0 for no limit. *)
@@ -127,7 +130,17 @@ type t = {
   (* The working memory a match takes when the caller gives none: one match at a time holds it, and a match that finds
      it held makes its own. *)
   state : Vm_state.t option Atomic.t;
+  (* The pattern's own working memory, made once: state holds it (this very option) when no match holds it, so that it
+     is taken and given back without allocating. *)
+  home : Vm_state.t option;
+  (* The text last made for a string of UTF-8 and of UTF-16: a string is immutable, so the same string again is the same
+     text, checked already, and no new one is made. *)
+  last8 : Units.text Atomic.t;
+  last16 : Units.text Atomic.t;
 }
+
+(* No text: what the pattern's text of the last string starts as. *)
+let no_text = { Units.s = ""; base = -1; len = 0 }
 
 let utf8_of_runes runes =
   let b = Buffer.create (Array.length runes) in
@@ -157,17 +170,31 @@ let compile_with_ns pattern flags timeout =
             (fun (name, groups) -> { name = utf8_of_runes name; name16 = utf16_of_runes name; groups })
             (Parse.group_names ps)
         in
-        let prog, _, _ = Compile.compile_program root (flags.unicode || flags.unicode_sets) None in
+        let prog = Prog.make root (flags.unicode || flags.unicode_sets) None in
+        let regular = (not ps.Parse.needs_backtracking) && Dfa.re2_cost root <= Dfa.max_re2_cost in
+        let dfa =
+          if regular then
+            (* Built from the pattern read again, so that a pattern does not keep its tree. *)
+            Some
+              (Once.make (fun () ->
+                   match Parse.parse_with pattern (syntax flags) with root, _ -> Dfa.build root | exception _ -> None))
+          else None
+        in
+        let home = Some (Vm_state.create ()) in
         Ok
           {
             pattern;
             flags;
             prog;
             caps = Atomic.make None;
+            dfa;
             group_count = Parse.group_count ps;
             names;
             timeout;
-            state = Atomic.make None;
+            state = Atomic.make home;
+            home;
+            last8 = Atomic.make no_text;
+            last16 = Atomic.make no_text;
           }
 
 let compile ?(flags = "") ?match_timeout pattern =
@@ -198,31 +225,29 @@ let unicode re = re.flags.unicode || re.flags.unicode_sets
 
 (* The program that records every group. *)
 let caps_program re =
-  if re.prog.groups = re.group_count then re.prog
+  if re.prog.p.groups = re.group_count then re.prog
   else
     match Atomic.get re.caps with
     | Some p -> p
     | None ->
         let root, _ = Parse.parse_with re.pattern (syntax re.flags) in
-        let p, _, _ = Compile.compile_program root (unicode re) (Some re.group_count) in
+        let p = Prog.make root (unicode re) (Some re.group_count) in
         ignore (Atomic.compare_and_set re.caps None (Some p));
         p
 
-type scratch = Vm_state.t
-
-let create_scratch = Vm_state.create
-
-(* Runs f with working memory: the caller's, the pattern's when no other match holds it, or a fresh one. *)
-let with_state re scratch f =
-  match scratch with
-  | Some st -> f st
+(* The working memory of a match: the domain's (OCaml 5), the pattern's when no other match holds it, or a fresh one. *)
+let take_state re =
+  match Domain_home.take () with
+  | Some st -> st
   | None -> (
-      match Atomic.exchange re.state None with
-      | Some st ->
-          let r = f st in
-          Atomic.set re.state (Some st);
-          r
-      | None -> f (Vm_state.create ()))
+      match re.home with
+      | Some home when Atomic.compare_and_set re.state re.home None -> home
+      | _ -> Vm_state.create ())
+
+(* Gives the working memory back to the domain or the pattern it came from. *)
+let release_state re st =
+  Domain_home.give_back st;
+  match re.home with Some home when home == st -> Atomic.set re.state re.home | _ -> ()
 
 let raise_stopped code = if code = Vm_state.stopped_time then raise Match_timeout else raise Match_memory
 
@@ -235,6 +260,19 @@ let utf8_text_of s =
 let utf16_text_of s =
   if String.length s land 1 <> 0 then invalid_arg "Corvus_regex_ecma262: UTF-16 text has an odd number of bytes";
   { Units.s; base = 0; len = String.length s / 2 }
+
+(* The text of a whole string, the one last made for it where it is the same string. *)
+let text_of (last : Units.text Atomic.t) make s =
+  let t = Atomic.get last in
+  if t.s == s && t.base = 0 then t
+  else begin
+    let t = make s in
+    Atomic.set last t;
+    t
+  end
+
+let text8 re s = text_of re.last8 utf8_text_of s
+let text16 re s = text_of re.last16 utf16_text_of s
 
 type utf8_text = Units.text
 
@@ -252,7 +290,8 @@ let utf8_text_exn ?off ?len s =
 (* What the operations over each encoding need of it. *)
 module type ENC = sig
   val utf8 : bool
-  val match_with : Compile.program -> Vm_state.t -> Units.text -> int -> bool -> int -> int
+  val match_with : Prog.t -> Vm_state.t -> Units.text -> int -> bool -> int -> int
+  val dfa_is_match : Dfa.t -> Units.text -> int
   val normalize : Units.text -> int -> bool -> int
   val advance : Units.text -> int -> bool -> int
   val push_lossy : Buffer.t -> Units.text -> int -> int -> unit
@@ -262,6 +301,7 @@ end
 module E8 = struct
   let utf8 = true
   let match_with = Vm8.match_with
+  let dfa_is_match = Vm8.dfa_is_match
   let normalize = Units.Units8.normalize
   let advance = Units.Units8.advance
   let push_lossy = Units.Units8.push_lossy
@@ -271,6 +311,7 @@ end
 module E16 = struct
   let utf8 = false
   let match_with = Vm16.match_with
+  let dfa_is_match = Vm16.dfa_is_match
   let normalize = Units.Units16.normalize
   let advance = Units.Units16.advance
   let push_lossy = Units.Units16.push_lossy
@@ -280,27 +321,34 @@ end
 (* A match: the text, and the start and end of the match and of each group (-1 for a group that did not take part). *)
 type m = { text : Units.text; slots : int array; mnames : group_name list; utf8 : bool }
 
-type captures = { mutable cslots : int array }
+(* The slots of the last match, and the working memory of the matches into them: captures are used by one match at a
+   time, so they keep a working memory of their own. *)
+type captures = { mutable cslots : int array; cstate : Vm_state.t }
 
-let captures re = { cslots = Array.make (2 * (re.group_count + 1)) (-1) }
+let captures re = { cslots = Array.make (2 * (re.group_count + 1)) (-1); cstate = Vm_state.create () }
 
 module Ops (E : ENC) = struct
   (* The first match at or after start (at start alone with sticky). With all_groups, out receives the start and end
      of the match and of every group; without it, the start and end of the match. It returns whether there is one. *)
-  let exec re scratch (t : Units.text) start sticky all_groups (out : int array) =
+  (* exec with the working memory st. out may be st.out, which the match is through with when out is written. *)
+  let exec_with re st (t : Units.text) start sticky all_groups (out : int array) =
     let start = E.normalize t start (unicode re) in
     let prog = if all_groups then caps_program re else re.prog in
-    let code =
-      with_state re scratch (fun st ->
-          let from = E.match_with prog st t start sticky re.timeout in
-          if from >= 0 then begin
-            out.(0) <- from;
-            out.(1) <- st.end_;
-            if all_groups then Array.blit st.caps 0 out 2 (Array.length st.caps)
-          end;
-          from)
-    in
-    if code >= 0 then true else if code = Vm_state.no_match then false else raise_stopped code
+    let from = E.match_with prog st t start sticky re.timeout in
+    if from >= 0 then begin
+      out.(0) <- from;
+      out.(1) <- st.end_;
+      if all_groups then Array.blit st.caps 0 out 2 (2 * prog.p.groups)
+    end;
+    from
+
+  let result code = if code >= 0 then true else if code = Vm_state.no_match then false else raise_stopped code
+
+  let exec re (t : Units.text) start sticky all_groups (out : int array) =
+    let st = take_state re in
+    let code = exec_with re st t start sticky all_groups out in
+    release_state re st;
+    result code
 
   (* The position a global search goes on from after a match from..to. *)
   let next_start re t from to_ = if to_ = from then E.advance t to_ (unicode re) else to_
@@ -310,29 +358,44 @@ module Ops (E : ENC) = struct
     E.push_lossy b t from to_;
     Buffer.contents b
 
-  let is_match ?scratch ?(pos = 0) re t =
-    let out = [| 0; 0 |] in
-    exec re scratch t pos re.flags.sticky false out
+  let is_match ?(pos = 0) re t =
+    let decided =
+      match re.dfa with
+      | Some d when pos = 0 && not re.flags.sticky -> (
+          match Once.get d with Some d -> E.dfa_is_match d t | None -> -1)
+      | _ -> -1
+    in
+    if decided >= 0 then decided = 1
+    else begin
+      let st = take_state re in
+      let code = exec_with re st t pos re.flags.sticky false st.out in
+      release_state re st;
+      result code
+    end
 
-  let find ?scratch ?(pos = 0) re t =
+  let find ?(pos = 0) re t =
     let slots = Array.make (2 * (re.group_count + 1)) (-1) in
-    if exec re scratch t pos re.flags.sticky true slots then Some { text = t; slots; mnames = re.names; utf8 = E.utf8 }
+    if exec re t pos re.flags.sticky true slots then Some { text = t; slots; mnames = re.names; utf8 = E.utf8 }
     else None
 
-  let exec_into ?scratch ?(pos = 0) re caps t =
+  let exec_into re caps ~pos t =
     let need = 2 * (re.group_count + 1) in
-    if Array.length caps.cslots <> need then caps.cslots <- Array.make need (-1) else Array.fill caps.cslots 0 need (-1);
-    exec re scratch t pos re.flags.sticky true caps.cslots
+    if Array.length caps.cslots <> need then caps.cslots <- Array.make need (-1)
+    else Array.fill caps.cslots 0 need (-1);
+    result (exec_with re caps.cstate t pos re.flags.sticky true caps.cslots)
 
-  let count ?scratch re t =
-    let out = [| 0; 0 |] and n = ref 0 and at = ref 0 and fin = ref false in
-    while not !fin do
-      if exec re scratch t !at re.flags.sticky false out then begin
+  let count re t =
+    let st = take_state re in
+    let n = ref 0 and at = ref 0 and code = ref 0 in
+    while !code >= 0 do
+      code := exec_with re st t !at re.flags.sticky false st.out;
+      if !code >= 0 then begin
         incr n;
-        at := next_start re t out.(0) out.(1)
+        at := next_start re t st.out.(0) st.out.(1)
       end
-      else fin := true
     done;
+    release_state re st;
+    ignore (result !code);
     !n
 
   let matches re t =
@@ -431,7 +494,7 @@ module Ops (E : ENC) = struct
     let out = Buffer.create (t.len + 16) in
     let last = ref 0 and at = ref 0 and any = ref false and fin = ref false in
     while not !fin do
-      if exec re None t !at re.flags.sticky true slots then begin
+      if exec re t !at re.flags.sticky true slots then begin
         any := true;
         let from = slots.(0) and to_ = slots.(1) in
         E.push_lossy out t !last from;
@@ -455,7 +518,7 @@ module Ops (E : ENC) = struct
     else begin
       let slots = Array.make (2 * (re.group_count + 1)) (-1) in
       if size = 0 then begin
-        if not (exec re None t 0 true true slots) then [ Some (piece t 0 0) ] else []
+        if not (exec re t 0 true true slots) then [ Some (piece t 0 0) ] else []
       end
       else begin
         let p = ref 0 and q = ref 0 and fin = ref false in
@@ -465,7 +528,7 @@ module Ops (E : ENC) = struct
           if !n = limit then fin := true
         in
         while (not !fin) && !q < size do
-          if not (exec re None t !q false true slots) then q := size
+          if not (exec re t !q false true slots) then q := size
           else begin
             let from = slots.(0) and to_ = slots.(1) in
             if from >= size then q := size
@@ -494,26 +557,26 @@ end
 module O8 = Ops (E8)
 module O16 = Ops (E16)
 
-let is_match ?scratch ?pos re s = O8.is_match ?scratch ?pos re (utf8_text_of s)
-let is_match_text ?scratch ?pos re t = O8.is_match ?scratch ?pos re t
-let is_match_utf16 ?scratch ?pos re s = O16.is_match ?scratch ?pos re (utf16_text_of s)
-let find ?scratch ?pos re s = O8.find ?scratch ?pos re (utf8_text_of s)
-let find_text ?scratch ?pos re t = O8.find ?scratch ?pos re t
-let find_utf16 ?scratch ?pos re s = O16.find ?scratch ?pos re (utf16_text_of s)
-let exec_into ?scratch ?pos re caps s = O8.exec_into ?scratch ?pos re caps (utf8_text_of s)
-let exec_into_text ?scratch ?pos re caps t = O8.exec_into ?scratch ?pos re caps t
-let exec_into_utf16 ?scratch ?pos re caps s = O16.exec_into ?scratch ?pos re caps (utf16_text_of s)
-let count ?scratch re s = O8.count ?scratch re (utf8_text_of s)
-let count_text ?scratch re t = O8.count ?scratch re t
-let count_utf16 ?scratch re s = O16.count ?scratch re (utf16_text_of s)
-let matches re s = O8.matches re (utf8_text_of s)
-let matches_utf16 re s = O16.matches re (utf16_text_of s)
-let replace re s tpl = O8.replace_gen re (utf8_text_of s) (utf8_text_of tpl) re.flags.global
-let replace_all re s tpl = O8.replace_gen re (utf8_text_of s) (utf8_text_of tpl) true
-let replace_utf16 re s tpl = O16.replace_gen re (utf16_text_of s) (utf16_text_of tpl) re.flags.global
-let replace_all_utf16 re s tpl = O16.replace_gen re (utf16_text_of s) (utf16_text_of tpl) true
-let split ?(limit = -1) re s = O8.split_gen re (utf8_text_of s) (if limit < 0 then max_int else limit)
-let split_utf16 ?(limit = -1) re s = O16.split_gen re (utf16_text_of s) (if limit < 0 then max_int else limit)
+let is_match ?pos re s = O8.is_match ?pos re (text8 re s)
+let is_match_text ?pos re t = O8.is_match ?pos re t
+let is_match_utf16 ?pos re s = O16.is_match ?pos re (text16 re s)
+let find ?pos re s = O8.find ?pos re (text8 re s)
+let find_text ?pos re t = O8.find ?pos re t
+let find_utf16 ?pos re s = O16.find ?pos re (text16 re s)
+let exec_into re caps ~pos s = O8.exec_into re caps ~pos (text8 re s)
+let exec_into_text re caps ~pos t = O8.exec_into re caps ~pos t
+let exec_into_utf16 re caps ~pos s = O16.exec_into re caps ~pos (text16 re s)
+let count re s = O8.count re (text8 re s)
+let count_text re t = O8.count re t
+let count_utf16 re s = O16.count re (text16 re s)
+let matches re s = O8.matches re (text8 re s)
+let matches_utf16 re s = O16.matches re (text16 re s)
+let replace re s tpl = O8.replace_gen re (text8 re s) (utf8_text_of tpl) re.flags.global
+let replace_all re s tpl = O8.replace_gen re (text8 re s) (utf8_text_of tpl) true
+let replace_utf16 re s tpl = O16.replace_gen re (text16 re s) (utf16_text_of tpl) re.flags.global
+let replace_all_utf16 re s tpl = O16.replace_gen re (text16 re s) (utf16_text_of tpl) true
+let split ?(limit = -1) re s = O8.split_gen re (text8 re s) (if limit < 0 then max_int else limit)
+let split_utf16 ?(limit = -1) re s = O16.split_gen re (text16 re s) (if limit < 0 then max_int else limit)
 
 let capture_start caps i = if 2 * i < Array.length caps.cslots then caps.cslots.(2 * i) else -1
 let capture_end caps i = if (2 * i) + 1 < Array.length caps.cslots then caps.cslots.((2 * i) + 1) else -1

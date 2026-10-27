@@ -1,4 +1,5 @@
-# The tests, the generated tables and the ECMA-262 test data, with OCaml 4.14 (the library's floor) and 5.5 on Linux,
+# The tests (of the API, of the searches against trying every position, and that a warm match allocates nothing), the
+# stack probe, the generated tables and the ECMA-262 test data, with OCaml 4.14 (the library's floor) and 5.5 on Linux,
 # 5.5 on macOS (arm64), Windows and Linux on arm64, and the compilers opam-repository's CI tests every package on (flambda
 # and no-flat-float-array). The data (github.com/corvus-dotnet/ecma262-regex-test-data) is pinned to a commit; the pass
 # is 0 wrong answers, 0 refusals of a valid pattern, 0 acceptances of an invalid one and 0 matches at their limit, in
@@ -89,6 +90,13 @@ jobs:
       run: opam exec -- dune test --force
       env:
         CORVUS_REGEX_MEMO_FROM_THE_START: '1'
+    - name: The stack probe
+      # Patterns built to overflow the stack, through every call, on stacks of 4 MB and 2 MB (docs/port-checklist.md):
+      # a fault or a process that ends is a failure.
+      if: runner.os == 'Linux'
+      run: |
+        opam exec -- dune build --profile release ./tools/stackprobe/stackprobe.exe
+        ./tools/stackprobe/run.sh
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       # The Unicode tables and the properties of strings are written from the Rust crate's, at the version this engine
       # ports.
