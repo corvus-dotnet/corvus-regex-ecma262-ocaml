@@ -1,0 +1,4 @@
+.git
+_build/
+wrong-cases*.tsv
+tools/benchmarks/versions.env

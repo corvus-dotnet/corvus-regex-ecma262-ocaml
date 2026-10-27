@@ -1,0 +1,14 @@
+; The Industry harness (run.sh), built only where re and pcre2 are installed (the image, Dockerfile): the package and
+; its tests need neither.
+
+(executable
+ (name industry)
+ (optional)
+ (libraries corvus-regex-ecma262 re pcre2 unix))
+
+(rule
+ (targets build_info.ml)
+ (action
+  (with-stdout-to
+   build_info.ml
+   (echo "let flambda = %{ocaml-config:flambda}\n"))))
