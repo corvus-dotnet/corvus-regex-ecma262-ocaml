@@ -176,20 +176,31 @@ let test_captures () =
   let re = compile ~flags:"u" "(?<k>\\w+)=(?<v>\\d+)" in
   let c = R.captures re in
   let text = R.utf8_text_exn "x a=1 b=22" in
-  check (R.exec_into_text re c text) "exec_into";
+  check (R.exec_into_text re c ~pos:0 text) "exec_into";
   check (R.capture_start c 0 = 2 && R.capture_end c 0 = 5) "the range of the match";
   check (R.capture_start c 2 = 4 && R.capture_end c 2 = 5) "the range of a group";
   let n = ref 0 and pos = ref 0 in
-  while R.exec_into_text ~pos:!pos re c text do
+  while R.exec_into_text re c ~pos:!pos text do
     incr n;
     pos := R.capture_end c 0
   done;
   check (!n = 2) "a loop of exec_into";
-  check (not (R.exec_into_text ~pos:11 re c text)) "no match from past the end";
+  check (not (R.exec_into_text re c ~pos:11 text)) "no match from past the end";
   check (R.capture_start c 0 = -1) "no range after no match";
-  check (R.exec_into_utf16 re c (ascii16 "k=7") && R.capture_start c 1 = 0 && R.capture_end c 1 = 1) "exec_into over UTF-16";
-  let s = R.create_scratch () in
-  check (R.exec_into ~scratch:s re c "k=7" && R.capture_start c 2 = 2) "exec_into with a scratch"
+  check
+    (R.exec_into_utf16 re c ~pos:0 (ascii16 "k=7") && R.capture_start c 1 = 0 && R.capture_end c 1 = 1)
+    "exec_into over UTF-16";
+  check (R.exec_into re c ~pos:0 "k=7" && R.capture_start c 2 = 2) "exec_into over a string"
+
+(* Patterns of different sizes share the working memory of a domain: a match of a simple shape, which the search answers
+   with no group, after a match that recorded many groups. *)
+let test_shared_memory () =
+  let many = compile "(a)(b)(c)(d)(e)" and simple = compile "\\d+" in
+  check (R.find many "abcde" <> None) "a match of five groups";
+  (match R.find simple "x 42" with
+  | Some m -> check (R.Match.start m = 2 && R.Match.end_ m = 4 && R.Match.group_count m = 0) "then a simple shape"
+  | None -> check false "then a simple shape");
+  check (R.find many "abcde" <> None && R.find simple "7" <> None) "and the two again"
 
 let () =
   test_flags ();
@@ -206,5 +217,6 @@ let () =
   test_timeout ();
   test_linear ();
   test_captures ();
+  test_shared_memory ();
   Printf.printf "%d checks, %d failed\n" !checks !failures;
   if !failures > 0 then exit 1

@@ -36,7 +36,11 @@ let one (i : inst) (t : Units.text) at units =
 let last_of (t : Units.text) lo hi back =
   let k = ref (hi - 1) and found = ref (-1) in
   while !found < 0 && !k >= lo do
-    if String.contains back (String.unsafe_get t.s (t.base + !k)) then found := !k else decr k
+    let c = String.unsafe_get t.s (t.base + !k) and j = ref 0 in
+    while !j < String.length back && String.unsafe_get back !j <> c do
+      incr j
+    done;
+    if !j < String.length back then found := !k else decr k
   done;
   !found
 
@@ -804,8 +808,8 @@ let starts_before (r : Adfa.reverse) (st : Vm_state.t) (t : Units.text) q most f
 let skip_ahead (s : Adfa.skip) (t : Units.text) at =
   let n = t.len and hi = s.hi and len = s.len in
   if T.utf8 && s.nranges > 0 && len <= 64 && at + hi < n then begin
-    (* Over UTF-8, the first run of bytes the window holds as long as the window, from at's place lo (index_run): a start
-       has a byte the window holds at each place from lo to hi. *)
+    (* Over UTF-8, the first run of bytes the window holds as long as the window, from at's place lo (index_run): a
+       start has a byte the window holds at each place from lo to hi. *)
     let lo = hi - len + 1 in
     let q = Kernels.index_run t.s (t.base + at + lo) (t.base + n) s.ranges s.nranges len in
     if q >= 0 then q - t.base - lo else at + ((n - hi - at + len - 1) / len * len)
@@ -851,6 +855,9 @@ let[@inline] mid_pair (t : Units.text) at =
   let b = T.get t (at - 1) in
   b >= 0xD800 && b <= 0xDBFF
 
+(* A position a kernel found, from the start of the text's string to the start of the text; -1 stays. *)
+let[@inline] rel base q = if q < 0 then -1 else q - base
+
 (* The first position at or after at whose unit a member of the first set can start with, or -1; at itself where the
    search has no first bytes or units. With the u or v flag the trail half of a pair is not a character a match can
    start at, unless pass_pairs (the scan, which passes over it itself, so that the skip is run from the place after
@@ -861,10 +868,9 @@ let first_find (pr : Prog.t) (t : Units.text) at pass_pairs =
     | None -> at
     | Some f ->
         let s = t.s and base = t.base and n = t.len in
-        let rel q = if q < 0 then -1 else q - base in
-        if f.fcount = 1 then rel (Kernels.index_byte1 s (base + at) (base + n) f.a)
-        else if f.fcount = 2 then rel (Kernels.index_byte2 s (base + at) (base + n) f.a f.b)
-        else if f.fcount <= 4 then rel (Kernels.index_byte4 s (base + at) (base + n) f.a f.b f.c f.d)
+        if f.fcount = 1 then rel base (Kernels.index_byte1 s (base + at) (base + n) f.a)
+        else if f.fcount = 2 then rel base (Kernels.index_byte2 s (base + at) (base + n) f.a f.b)
+        else if f.fcount <= 4 then rel base (Kernels.index_byte4 s (base + at) (base + n) f.a f.b f.c f.d)
         else begin
           (* More than four first bytes are a class (a word's letters, which the next word starts with a byte or two
              on): the next four bytes by the table, before a vector search is set up. *)
@@ -874,7 +880,7 @@ let first_find (pr : Prog.t) (t : Units.text) at pass_pairs =
             else incr k
           done;
           if !found >= 0 then !found
-          else if f.nranges > 0 then rel (Kernels.index_ranges s (base + e) (base + n) f.ranges f.nranges)
+          else if f.nranges > 0 then rel base (Kernels.index_ranges s (base + e) (base + n) f.ranges f.nranges)
           else begin
             let k = ref e in
             while !found < 0 && !k < n do
@@ -1042,7 +1048,11 @@ let forms_match (pr : Prog.t) (literals : Literals.t) (forms : int array array a
             else begin
               let c = T.get t !at in
               let p = if c < 0x80 then Units.pack c 1 else T.read t !at pr.p.units in
-              if Array.mem (rune_of p) alt.(!j) then begin
+              let forms = alt.(!j) and r = rune_of p and f = ref 0 in
+              while !f < Array.length forms && Array.unsafe_get forms !f <> r do
+                incr f
+              done;
+              if !f < Array.length forms then begin
                 at := !at + width_of p;
                 incr j
               end
@@ -1209,22 +1219,19 @@ let search_reverse (pr : Prog.t) literals lo hi reverse rest st (t : Units.text)
         m1 := !m1 land lnot ((1 lsl (lo - word_bits)) - 1)
       end
       else if lo > 0 then m0 := !m0 land lnot ((1 lsl lo) - 1);
-      let add d =
-        let at = !q - d in
-        if at >= !base && at > !tried then begin
-          let b = at - !base in
-          if b < word_bits then p0 := !p0 lor (1 lsl b) else p1 := !p1 lor (1 lsl (b - word_bits))
-        end
-      in
-      while !m0 <> 0 do
-        let d = lowest_bit !m0 in
-        m0 := !m0 land lnot (1 lsl d);
-        add d
-      done;
-      while !m1 <> 0 do
-        let d = lowest_bit !m1 in
-        m1 := !m1 land lnot (1 lsl d);
-        add (d + word_bits)
+      (* Each start the terms allow that is not tried yet waits; the words are read in turn, with no closure, so that
+         the references stay in registers. *)
+      for w = 0 to 1 do
+        let m = ref (if w = 0 then !m0 else !m1) in
+        while !m <> 0 do
+          let bit = lowest_bit !m in
+          m := !m land lnot (1 lsl bit);
+          let at = !q - (bit + (w * word_bits)) in
+          if at >= !base && at > !tried then begin
+            let b = at - !base in
+            if b < word_bits then p0 := !p0 lor (1 lsl b) else p1 := !p1 lor (1 lsl (b - word_bits))
+          end
+        done
       done;
       let after = !q + width_at pr t !q in
       (* The earliest waiting start is tried once no occurrence before it plus the window could allow an earlier one: an
@@ -1326,7 +1333,12 @@ let search_after_loops (pr : Prog.t) literals (sets : Charset.t array) (mins : i
   let next = ref start in
   (* The floor below which no start is tried again. *)
   let low = ref start in
-  let all_empty = Array.for_all (fun m -> m = 0) mins in
+  (* A loop by hand: the library's for_all makes a closure at each call. *)
+  let all_empty = ref true in
+  for k = 0 to Array.length mins - 1 do
+    if mins.(k) <> 0 then all_empty := false
+  done;
+  let all_empty = !all_empty in
   let nsets = Array.length sets in
   let result = ref (-6) in
   while !result = -6 do
@@ -1351,7 +1363,8 @@ let search_after_loops (pr : Prog.t) literals (sets : Charset.t array) (mins : i
           let run_start = !at and fin = ref false in
           while (not !fin) && !at > !low do
             let c = T.get t (!at - 1) in
-            let r, w = if c < 0x80 then (c, 1) else let p = T.read_last t !at units in (rune_of p, width_of p) in
+            let p = if c < 0x80 then Units.pack c 1 else T.read_last t !at units in
+            let r = rune_of p and w = width_of p in
             if (not (Charset.contains sets.(!k) r)) || !at - w < !low then fin := true else at := !at - w
           done;
           if mins.(!k) = 1 && !at = run_start then skip := true;
@@ -1385,27 +1398,29 @@ let search_after_loops (pr : Prog.t) literals (sets : Charset.t array) (mins : i
   done;
   !result
 
-(* What try_starts gives: a start matched (in at), the search is over without one, or the starts ran out (at is where).
-*)
+(* What try_starts gives: a start matched, the search is over without one, or the starts ran out; with the place it
+   stopped at (the start that matched, or where the starts ran out) in st.out.(1). *)
 let tried_found = 0
 let tried_over = 1
 let tried_out = 2
 
 (* Tries the starts from at to last in order, as the plain search would. *)
-let try_starts (pr : Prog.t) st (t : Units.text) (at : int ref) last =
-  let len = t.len and result = ref (-1) in
+let try_starts (pr : Prog.t) st (t : Units.text) at last =
+  let len = t.len and result = ref (-1) and at = ref at in
   while !result < 0 && !at <= last && !at <= len do
     if (not pr.p.units) && mid_pair t !at then incr at
     else if !at = len then result := if pr.p.first = None && run pr st t !at then tried_found else tried_over
     else begin
       let c = T.get t !at in
-      let r, w = if c < 0x80 then (c, 1) else let p = T.read t !at pr.p.units in (rune_of p, width_of p) in
+      let p = if c < 0x80 then Units.pack c 1 else T.read t !at pr.p.units in
+      let r = rune_of p and w = width_of p in
       let allowed = match pr.p.first with None -> true | Some f -> Charset.contains f r in
       if allowed && run pr st t !at then result := tried_found
       else if st.stop <> stop_none then result := tried_over
       else at := !at + w
     end
   done;
+  st.out.(1) <- !at;
   if !result < 0 then tried_out else !result
 
 (* Tries every start from start that the first set allows. *)
@@ -1426,7 +1441,8 @@ let scan (pr : Prog.t) st (t : Units.text) start need =
     else if !at = len then result := if pr.p.first = None && run pr st t !at then !at else no_match
     else begin
       let c = T.get t !at in
-      let r, w = if c < 0x80 then (c, 1) else let p = T.read t !at pr.p.units in (rune_of p, width_of p) in
+      let p = if c < 0x80 then Units.pack c 1 else T.read t !at pr.p.units in
+      let r = rune_of p and w = width_of p in
       if s.leading_word_boundary && !at > 0 && is_word_unit (T.get t (!at - 1)) then begin
         (* Inside a word, where \b cannot hold: the rest of the word is passed over. *)
         let first = match pr.p.first with Some f -> f | None -> Charset.make [||] in
@@ -1442,7 +1458,8 @@ let scan (pr : Prog.t) st (t : Units.text) start need =
             if kind = scan_none then result := no_match
             else if kind = scan_idle then at := place
             else begin
-              let tried = try_starts pr st t at place in
+              let tried = try_starts pr st t !at place in
+              at := st.out.(1);
               if tried = tried_found then result := !at else if tried = tried_over then result := no_match
             end
         | None ->

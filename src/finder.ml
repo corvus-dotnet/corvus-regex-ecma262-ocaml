@@ -43,9 +43,12 @@ let pair_share = 25
 let unit_shares =
   let t = Array.make 128 10 in
   let lower = "etaoinshrdlcumwfgypbvkjxqz"
-  and lower_per_mille = [| 102; 73; 66; 60; 56; 54; 50; 49; 48; 34; 32; 22; 22; 19; 19; 18; 16; 16; 15; 12; 8; 6; 2; 2; 1; 1 |]
+  and lower_per_mille =
+    [| 102; 73; 66; 60; 56; 54; 50; 49; 48; 34; 32; 22; 22; 19; 19; 18; 16; 16; 15; 12; 8; 6; 2; 2; 1; 1 |]
   and upper = "ITHASWMECBNOYRLDPGFJUVKXQZ"
-  and upper_per_ten_thousand = [| 65; 28; 21; 18; 16; 13; 13; 12; 10; 10; 9; 9; 8; 8; 7; 6; 6; 5; 5; 4; 2; 2; 2; 1; 1; 1 |] in
+  and upper_per_ten_thousand =
+    [| 65; 28; 21; 18; 16; 13; 13; 12; 10; 10; 9; 9; 8; 8; 7; 6; 6; 5; 5; 4; 2; 2; 2; 1; 1; 1 |]
+  in
   String.iteri (fun k c -> t.(Char.code c) <- lower_per_mille.(k) * 10) lower;
   String.iteri (fun k c -> t.(Char.code c) <- upper_per_ten_thousand.(k)) upper;
   t.(Char.code ' ') <- 1700;
@@ -58,11 +61,13 @@ let unit_shares =
 (* An ASCII unit's share of English text in parts per ten thousand. *)
 let unit_share b = unit_shares.(b land 0x7F)
 
-let lu = Once.make (fun () -> match Ucd.category "Lu" with Some r -> Charset.make (Ucd.pairs r) | None -> Charset.make [||])
+let lu =
+  Once.make (fun () -> match Ucd.category "Lu" with Some r -> Charset.make (Ucd.pairs r) | None -> Charset.make [||])
 
 let lower_letters =
   Once.make (fun () ->
-      Charset.make (Array.concat (List.filter_map (fun n -> Option.map Ucd.pairs (Ucd.category n)) [ "Ll"; "Lt"; "Lm"; "Lo" ])))
+      let pairs n = Option.map Ucd.pairs (Ucd.category n) in
+      Charset.make (Array.concat (List.filter_map pairs [ "Ll"; "Lt"; "Lm"; "Lo" ])))
 
 (* A UTF-16 code unit's share of text, for the choice of the unit a search over UTF-16 looks for: an ASCII unit as
    unit_share has it; a capital of another alphabet (Latin, Greek, Cyrillic, Armenian) as rare as an ASCII capital and
@@ -78,7 +83,8 @@ let share16 u =
    five), a space or the commonest punctuation, nor a byte beyond ASCII, where the lead bytes of a script are common. *)
 let rare_byte b =
   if (b >= Char.code 'A' && b <= Char.code 'Z') || (b >= Char.code '0' && b <= Char.code '9') then true
-  else if b > 0x20 && b < 0x7F && not (b >= Char.code 'a' && b <= Char.code 'z') then not (String.contains ",.'\"-" (Char.chr b))
+  else if b > 0x20 && b < 0x7F && not (b >= Char.code 'a' && b <= Char.code 'z') then
+    not (String.contains ",.'\"-" (Char.chr b))
   else String.contains "jqxzk" (Char.chr b)
 
 (* Whether a byte is rare enough to be searched for alone: one rare_byte names, and one the ranks do not mark common (a
@@ -245,7 +251,9 @@ let build_firsts (literals : string array) (rank : int array) =
     let k = !best_k in
     let v = position_values literals k in
     let by_value = Array.make 256 [||] in
-    Array.iter (fun x -> by_value.(x) <- Array.of_list (List.filter (fun l -> byte l k = x) (Array.to_list literals))) v;
+    Array.iter
+      (fun x -> by_value.(x) <- Array.of_list (List.filter (fun l -> byte l k = x) (Array.to_list literals)))
+      v;
     let at idx = v.(min idx (Array.length v - 1)) in
     Some
       (if !best_range then

@@ -93,5 +93,6 @@ external has_wide_c : unit -> (int[@untagged]) = "cre_has_wide_byte" "cre_has_wi
    it off to try the table finder's own loop. *)
 let has_shuffle = ref (has_shuffle_c () <> 0)
 
-(* Whether the processor reads 32 bytes at a time (AVX2), where a literal's two rarest bytes searched for together pay. *)
+(* Whether the processor reads 32 bytes at a time (AVX2), where a literal's two rarest bytes searched for together
+   pay. *)
 let has_wide = ref (has_wide_c () <> 0)

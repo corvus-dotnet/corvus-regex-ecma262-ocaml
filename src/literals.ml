@@ -28,7 +28,10 @@ let utf8_bytes (r : int array) =
 
 let utf16_units (r : int array) =
   let out = ref [] in
-  Array.iter (fun c -> if c > 0xFFFF then out := Units.low_surrogate c :: Units.high_surrogate c :: !out else out := c :: !out) r;
+  Array.iter
+    (fun c ->
+      if c > 0xFFFF then out := Units.low_surrogate c :: Units.high_surrogate c :: !out else out := c :: !out)
+    r;
   Array.of_list (List.rev !out)
 
 type t = {

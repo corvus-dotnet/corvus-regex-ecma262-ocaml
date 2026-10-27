@@ -51,7 +51,8 @@ let count r out =
 
 (* How the end of a run of a loop's members is found (RunEnd of search.rs). Each finds it a member at a time. All: the
    set holds every character, and the run is the rest of the text. Stops: the set holds every character but up to three
-   ASCII ones (their number, then the bytes with the last repeated to three), found by the searches for bytes, with the units that end a run over UTF-16.
+   ASCII ones (their number, then the bytes with the last repeated to three), found by the searches for bytes, with the
+   units that end a run over UTF-16.
    Line: the set holds every character but the four line terminators (the dot): LF and CR are found by the search for
    bytes, with the lead byte of U+2028 and U+2029, which is looked at further where it is found. *)
 type run_end = Each | All | Stops of int * int * int * int * Literals.unit_set | Line of Literals.unit_set
@@ -98,7 +99,8 @@ type first_bytes = {
   (* Up to four ranges that hold every byte, and maybe more: the runs of the ASCII bytes, and one run from the least to
      the greatest lead byte of the others (every byte between is a lead byte too, so a candidate is never inside a
      character). A candidate is tested against the first set, so a byte too many costs a test and nothing else. ranges
-     are as Kernels.index_ranges reads them (the one range lo to hi where is_range); nranges is 0 when there are more. *)
+     are as Kernels.index_ranges reads them (the one range lo to hi where is_range); nranges is 0 when there are
+     more. *)
   nranges : int;
   ranges : string;
 }
@@ -121,7 +123,14 @@ type t = {
 }
 
 let none =
-  { plan = Scan; shape = No_shape; skip_run = None; leading_word_boundary = false; first_bytes = None; first_units = None }
+  {
+    plan = Scan;
+    shape = No_shape;
+    skip_run = None;
+    leading_word_boundary = false;
+    first_bytes = None;
+    first_units = None;
+  }
 
 (* Makes every pattern compiled while it is set try every position its first set allows, which the tests compare the
    searches with. *)
@@ -143,7 +152,9 @@ let mul_far a b =
 (* The search for the bytes a set's members start with, or None when they are none or too many. *)
 let first_bytes_of (s : Charset.t) units =
   let table = Bytes.make 256 '\000' in
-  let spans = [| (0, 0x7F, 0, 0x00); (0x80, 0x7FF, 6, 0xC0); (0x800, 0xFFFF, 12, 0xE0); (0x10000, 0x10FFFF, 18, 0xF0) |] in
+  let spans =
+    [| (0, 0x7F, 0, 0x00); (0x80, 0x7FF, 6, 0xC0); (0x800, 0xFFFF, 12, 0xE0); (0x10000, 0x10FFFF, 18, 0xF0) |]
+  in
   try
     let r = s.ranges in
     let k = ref 0 in
@@ -257,7 +268,10 @@ let first_units_of (s : Charset.t) =
   done;
   let m = !merged in
   if Array.length m = 0 then None
-  else Some (Literals.unit_set (Array.init (2 * Array.length m) (fun k -> if k mod 2 = 0 then fst m.(k / 2) else snd m.(k / 2))))
+  else
+    Some
+      (Literals.unit_set
+         (Array.init (2 * Array.length m) (fun k -> if k mod 2 = 0 then fst m.(k / 2) else snd m.(k / 2))))
 
 (* The forms of a character the search can look for: a literal code point, or the members of a small class. *)
 let forms_of n =
@@ -329,7 +343,9 @@ let rec width n =
       | None -> None
       | Some (a, b) ->
           let lo = mul_far a n.min in
-          let hi = if n.max = unbounded && b = 0 then 0 else if n.max = unbounded || b < 0 then -1 else mul_far b n.max in
+          let hi =
+            if n.max = unbounded && b = 0 then 0 else if n.max = unbounded || b < 0 then -1 else mul_far b n.max
+          in
           Some (lo, hi))
   | Backref -> None
   | _ -> Some (0, 0)
@@ -357,10 +373,13 @@ let rec anchors_after n lo hi (before : node array) (after : node array) =
               incr k
           | None -> continue := false
         done;
-        Some [ { chars = Array.of_list (List.rev !chars); alo = lo; ahi = hi; prefix = Array.of_list (List.rev !prefix); rest } ]
+        let chars = Array.of_list (List.rev !chars) and prefix = Array.of_list (List.rev !prefix) in
+        Some [ { chars; alo = lo; ahi = hi; prefix; rest } ]
       end
       else begin
-        let alt = if t.kind = Alt then Some t else if t.kind = Group && t.subs.(0).kind = Alt then Some t.subs.(0) else None in
+        let alt =
+          if t.kind = Alt then Some t else if t.kind = Group && t.subs.(0).kind = Alt then Some t.subs.(0) else None
+        in
         match alt with
         | Some alt -> (
             let following = Array.append (slice ts (k + 1)) after in
@@ -474,8 +493,9 @@ let shape_of_literals root (found : anchor list) counts cut_short =
       let literal =
         (not cut_short)
         && List.length found = Array.length all
-        && List.for_all2 (fun (a, c) forms -> a.alo = 0 && a.ahi = 0 && c = Array.length forms) (List.combine found counts)
-             (Array.to_list all)
+        && List.for_all2
+             (fun (a, c) forms -> a.alo = 0 && a.ahi = 0 && c = Array.length forms)
+             (List.combine found counts) (Array.to_list all)
       in
       if literal then Literals_only else Forms all
     with Exit -> No_shape
@@ -575,7 +595,8 @@ let plan root backrefs (first : Charset.t option) units =
             let reverse, rest =
               if !hi > 0 then begin
                 let reverse = Adfa.reverse (List.map (fun a -> a.prefix) found) in
-                (* Where every anchor is the end of its alternative, the occurrence is all the rest there is to check. *)
+                (* Where every anchor is the end of its alternative, the occurrence is all the rest there is to
+                   check. *)
                 let longer = List.exists (fun a -> Array.length a.rest > Array.length a.chars) found in
                 let rest =
                   if longer then

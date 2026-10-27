@@ -1,8 +1,8 @@
-(* The tests of the searches for where a match starts, and of the automata they use, ported from the Rust crate's tests.rs
-   (by way of the Pascal engine's TestSearch): each search finds what trying every position finds. A pattern is compiled
-   here as the library compiles it, and again with Search.no_search set, which makes the search try every position its
-   first set allows. The program prints each failure and a final count, and exits with a status other than zero when
-   anything failed. *)
+(* The tests of the searches for where a match starts, and of the automata they use, ported from the Rust crate's
+   tests.rs (by way of the Pascal engine's TestSearch): each search finds what trying every position finds. A pattern is
+   compiled here as the library compiles it, and again with Search.no_search set, which makes the search try every
+   position its first set allows. The program prints each failure and a final count, and exits with a status other than
+   zero when anything failed. *)
 
 module R = Corvus_regex_ecma262
 module Parse = Corvus_regex_ecma262__Parse
@@ -121,19 +121,23 @@ let test_searches_find_what_every_position_finds () =
       "Sher[a-z]+|Hol[a-z]+"; "i"; "[a-q][^u-z]{13}x"; ""; "[a-zA-Z]+ing"; ""; "\\s[a-zA-Z]{0,12}ing\\s"; "";
       "\\w+\\s+Holmes"; ""; "\\w+\\s+Holmes\\s+\\w+"; ""; "\\b\\w+n\\b"; ""; "\\w+n\\b"; ""; ".*$"; ""; "(?:.)??$"; "";
       ".*\\s"; ""; "abcd|bc"; ""; "(?:x|y)*z|q"; ""; "\\b(?:the|he)\\b"; "i"; "Holmes.{0,25}Watson|Watson.{0,25}Holmes";
-      ""; "Tom.{1,5}er|er.{1,5}Tom"; ""; "\\w+n(?=\\s)"; ""; "[a-z]+n\\B"; "i"; "\\w+\\s+Holmes$"; "m"; "[a-z]+ing\\b|x"; "";
+      ""; "Tom.{1,5}er|er.{1,5}Tom"; ""; "\\w+n(?=\\s)"; ""; "[a-z]+n\\B"; "i"; "\\w+\\s+Holmes$"; "m";
+      "[a-z]+ing\\b|x"; "";
       ".{0,2}(Tom|Sawyer|Huckleberry|Finn)"; ""; ".{2,4}(Tom|Sawyer|Huckleberry|Finn)"; "";
-      "Tom.{10,25}river|river.{10,25}Tom"; ""; "([A-Za-z]awyer|[A-Za-z]inn)\\s"; ""; "[\\w\\.+-]+@[\\w\\.-]+\\.[\\w\\.-]+"; "";
+      "Tom.{10,25}river|river.{10,25}Tom"; ""; "([A-Za-z]awyer|[A-Za-z]inn)\\s"; "";
+      "[\\w\\.+-]+@[\\w\\.-]+\\.[\\w\\.-]+"; "";
       "\\p{Sm}"; ""; "(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9])"; "";
       "Шерлок Холмс|Джон Уотсон"; "i"; "夏洛克|福尔摩斯"; ""; "sk"; "i"; "ks"; "i"; "\\u{1F600}a|b\\u{10400}"; "";
       "a\\u{1F600}"; ""; "\\ud83d"; ""; "x*y"; ""; "[a-c]*b+c"; ""; "(?:ab)?c"; ""; "\\béé\\w*"; "";
       (* One literal with no ASCII byte rare enough alone: a capital's last byte alone, then the two rarest bytes. *)
       "Шерлок"; ""; "Éa"; ""; "aé"; ""; "洛克"; "";
       "(?<=a)b|c"; ""; "[\\p{L}--[a-z]]+t"; "v"; "[\\q{abc|de}x]y"; "v"; "\\w+"; ""; ".*"; ""; ".+"; "s"; "[^\\n]*"; "";
-      "[^\\n.]+"; ""; "\\p{L}"; ""; "[\\ud800-\\udfff]"; ""; "Tom|river|Tomas"; ""; "ab|a"; ""; "sherlock|holmes|k"; "i";
+      "[^\\n.]+"; ""; "\\p{L}"; ""; "[\\ud800-\\udfff]"; ""; "Tom|river|Tomas"; ""; "ab|a"; "";
+      "sherlock|holmes|k"; "i";
       "\\u{1F600}|Ш"; ""; "(|([^a]|[^a][^a]){2,4}){2}(\\3){3,5}?x"; ""; "[^a]{0,3}(?:xx|x)"; "";
       "\\s[a-zA-Z]{0,12}ing\\s"; ""; "\\d{3}-\\d{4}"; ""; "[0-9]+\\.[0-9]+"; ""; "(?:\\d+\\.){3}\\d+"; "";
-      "\\b\\d\\d:\\d\\d\\b"; ""; "[A-Z]{2}\\d{2}"; ""; "(?:1|22|333)\\.5\\.\\d"; ""; "\\d{2}[é5]\\d"; "u"; "\\d{3}[éèêë5]"; "u";
+      "\\b\\d\\d:\\d\\d\\b"; ""; "[A-Z]{2}\\d{2}"; ""; "(?:1|22|333)\\.5\\.\\d"; ""; "\\d{2}[é5]\\d"; "u";
+      "\\d{3}[éèêë5]"; "u";
       "^abc"; "m"; "x{0}^abc"; ""; "\\babc\\b"; ""; "abc\\s+\\w+"; ""; "Sherlock\\s+\\w+"; ""; "a|bc|def"; "";
       "colou?r|grey"; "i"; "[^a]+b"; ""; "(?:a|b)+c"; ""; "\\d+"; ""; "[\\d,]+"; ""; "x(?:y|z)w"; ""; "ab*c|d"; "" ]
   [@@ocamlformat "disable"]
@@ -172,7 +176,8 @@ let test_searches_find_what_every_position_finds () =
 let test_starts_the_fuzzer_found () =
   let cases =
     [ "\\b\\w+n\\b"; ""; "a nation"; "\\b\\w+n\\b"; ""; "an nation nn nan noon"; "\\w+\\s+Holmes"; ""; "Holmes Holmes";
-      "\\b\\d*\\s*a\\b"; ""; " a"; "\\b\\d*\\W*x\\b"; "s"; " ééx"; "\\b\\d*\\W*x"; ""; "a1 x"; "\\b\\d*\\W+\\w+ab"; ""; "ab0 aab";
+      "\\b\\d*\\s*a\\b"; ""; " a"; "\\b\\d*\\W*x\\b"; "s"; " ééx"; "\\b\\d*\\W*x"; ""; "a1 x"; "\\b\\d*\\W+\\w+ab"; "";
+      "ab0 aab";
       "\\b\\w*[\\u{1F600}-\\u{1F64F}]*S\\B"; "u"; "😀S_n😀S"; "\\W+[a-z]*\\W*a"; "m"; " a"; "[a-zéè]+\\d*[a-z]+on"; "i";
       " ONaON"; "\\w+?[^\\w\\s]*\\d+?n"; "im"; "000n"; "\\w*\\W+-$"; ""; " a\xC2\xA0-a--"; "\\w*[^\\w\\s]+k$"; "";
       "---_-ka.k"; "\\b[0-9a-f]*ét"; ""; "\nét0aét"; ".{1,3}(?:on|\\.)."; ""; "😀😀😀ona on";
@@ -266,7 +271,9 @@ let test_dot_all_run () =
       let unicode = String.contains flags 'u' || String.contains flags 'v' in
       let get p = match compile p flags false with Some s -> s | None -> failwith p in
       let shortcut = get ".*" and matcher = get "(.*)" and plus = get ".+" and plus_matcher = get "(.+)" in
-      check (match shortcut.prog.search.shape with Search.Loop _ -> true | _ -> false) (".* is the loop shape with " ^ flags);
+      check
+        (match shortcut.prog.search.shape with Search.Loop _ -> true | _ -> false)
+        (".* is the loop shape with " ^ flags);
       Array.iteri
         (fun k units ->
           let a = Array.of_list units in
@@ -363,7 +370,8 @@ let test_plans () =
       ("\\w+", "", "scan", "loop", false);
       ("\\p{Sm}", "u", "scan", "set", false) ];
   (match compile "Sherlock\\s+\\w+" "" false with
-  | Some s -> check (s.prog.after_literal <> None && s.prog.anchored_dfa <> None) "the automaton goes on after the literal"
+  | Some s ->
+      check (s.prog.after_literal <> None && s.prog.anchored_dfa <> None) "the automaton goes on after the literal"
   | None -> check false "Sherlock\\s+\\w+ compiles");
   match compile "\\b\\w+n\\b" "" false with
   | Some s -> check s.prog.search.leading_word_boundary "a leading word boundary is passed over inside a word"
@@ -373,7 +381,8 @@ let test_plans () =
    text. *)
 let test_automaton () =
   let patterns =
-    [ "^[a-z]+\\d*$"; ""; "\\bfoo\\b"; ""; "\\Bo+\\B"; "u"; "(a|ab)(c|bcd)(d*)"; ""; "colou?r"; "i"; "^$"; ""; "x{2,4}y"; "";
+    [ "^[a-z]+\\d*$"; ""; "\\bfoo\\b"; ""; "\\Bo+\\B"; "u"; "(a|ab)(c|bcd)(d*)"; ""; "colou?r"; "i"; "^$"; "";
+      "x{2,4}y"; "";
       "[^\\s]+@[^\\s]+"; "u"; "a|"; ""; "(?:ab)*c"; "" ]
   [@@ocamlformat "disable"]
   in
@@ -407,7 +416,8 @@ let test_automaton () =
             texts)
     (pairs patterns)
 
-(* The searches again with the processor's vector kernels turned off: the byte shuffle of Teddy and the 32-byte loads. *)
+(* The searches again with the processor's vector kernels turned off: the byte shuffle of Teddy and the 32-byte
+   loads. *)
 let test_without_vectors () =
   let shuffle = !Kernels.has_shuffle and wide = !Kernels.has_wide in
   Kernels.has_shuffle := false;

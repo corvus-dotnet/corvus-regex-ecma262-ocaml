@@ -57,7 +57,9 @@ let compile root match_state =
       match n.kind with
       | Empty -> next
       | Char ->
-          let set = if n.r >= 0 && n.r < 128 then String.init 128 (fun c -> if c = n.r then '\001' else '\000') else no_set in
+          let set =
+            if n.r >= 0 && n.r < 128 then String.init 128 (fun c -> if c = n.r then '\001' else '\000') else no_set
+          in
           add b { (nstate NSet next) with nset = set }
       | Set -> add b { (nstate NSet next) with nset = (class_of n).ascii }
       | Cat ->
@@ -256,7 +258,11 @@ let build root =
                 if has_match resolved then accept
                 else begin
                   let moved =
-                    List.filter_map (fun i -> let s = nfa.(i) in if s.nk = NSet && s.nset.[c] <> '\000' then Some s.out else None) resolved
+                    List.filter_map
+                      (fun i ->
+                        let s = nfa.(i) in
+                        if s.nk = NSet && s.nset.[c] <> '\000' then Some s.out else None)
+                      resolved
                   in
                   let next = closure (moved @ restart) false false None in
                   let to_ = intern next (is_word c) false in

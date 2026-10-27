@@ -9,3 +9,8 @@
  (name test_search)
  (modules test_search)
  (libraries corvus-regex-ecma262))
+
+(test
+ (name test_alloc)
+ (modules test_alloc)
+ (libraries corvus-regex-ecma262))

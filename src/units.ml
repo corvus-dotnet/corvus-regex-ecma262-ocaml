@@ -34,6 +34,8 @@ let[@inline] is_low u = u >= 0xDC00 && u <= 0xDFFF
 (* Whether a code unit is one of the 63 ASCII word characters. *)
 let[@inline] is_word_unit c = c < 0x80 && Charset.is_word_byte c
 
+let[@inline] byte_at s k = Char.code (String.get s k)
+
 (* The code point at s.[at], before the byte at stop, and its width: (rune_error, 1) for bytes that are not UTF-8 and
    (rune_error, 0) for no bytes. (utf8.DecodeRune.) *)
 let decode_bytes s at stop =
@@ -43,20 +45,26 @@ let decode_bytes s at stop =
     if p0 < rune_self then pack p0 1
     else begin
       let n = stop - at in
-      let b k = Char.code (String.get s (at + k)) in
-      if p0 >= 0xC2 && p0 <= 0xDF && n >= 2 && continuation (b 1) then pack (((p0 land 0x1F) lsl 6) lor (b 1 land 0x3F)) 2
-      else if p0 >= 0xE0 && p0 <= 0xEF && n >= 3 && continuation (b 2) then begin
+      if p0 >= 0xC2 && p0 <= 0xDF && n >= 2 && continuation (byte_at s (at + 1)) then
+        pack (((p0 land 0x1F) lsl 6) lor (byte_at s (at + 1) land 0x3F)) 2
+      else if p0 >= 0xE0 && p0 <= 0xEF && n >= 3 && continuation (byte_at s (at + 2)) then begin
         let lo, hi = if p0 = 0xE0 then (0xA0, 0xBF) else if p0 = 0xED then (0x80, 0x9F) else (0x80, 0xBF) in
-        let b1 = b 1 in
-        if b1 >= lo && b1 <= hi then pack (((p0 land 0x0F) lsl 12) lor ((b1 land 0x3F) lsl 6) lor (b 2 land 0x3F)) 3
+        let b1 = byte_at s (at + 1) in
+        if b1 >= lo && b1 <= hi then
+          pack (((p0 land 0x0F) lsl 12) lor ((b1 land 0x3F) lsl 6) lor (byte_at s (at + 2) land 0x3F)) 3
         else pack rune_error 1
       end
-      else if p0 >= 0xF0 && p0 <= 0xF4 && n >= 4 && continuation (b 2) && continuation (b 3) then begin
+      else if
+        p0 >= 0xF0 && p0 <= 0xF4 && n >= 4 && continuation (byte_at s (at + 2)) && continuation (byte_at s (at + 3))
+      then begin
         let lo, hi = if p0 = 0xF0 then (0x90, 0xBF) else if p0 = 0xF4 then (0x80, 0x8F) else (0x80, 0xBF) in
-        let b1 = b 1 in
+        let b1 = byte_at s (at + 1) in
         if b1 >= lo && b1 <= hi then
           pack
-            (((p0 land 0x07) lsl 18) lor ((b1 land 0x3F) lsl 12) lor ((b 2 land 0x3F) lsl 6) lor (b 3 land 0x3F))
+            (((p0 land 0x07) lsl 18)
+            lor ((b1 land 0x3F) lsl 12)
+            lor ((byte_at s (at + 2) land 0x3F) lsl 6)
+            lor (byte_at s (at + 3) land 0x3F))
             4
         else pack rune_error 1
       end

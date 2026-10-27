@@ -1,0 +1,5 @@
+; The stack probe: patterns built to overflow the stack, asked through every call (see run.sh).
+
+(executable
+ (name stackprobe)
+ (libraries corvus-regex-ecma262 unix))

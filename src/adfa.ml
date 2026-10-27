@@ -364,7 +364,13 @@ let build_with root forward =
             in
             take resolved
           in
-          let moved = List.filter_map (fun i -> let s = nfa.(i) in if s.sk = KSet && in_set s c then Some s.out else None) resolved in
+          let moved =
+            List.filter_map
+              (fun i ->
+                let s = nfa.(i) in
+                if s.sk = KSet && in_set s c then Some s.out else None)
+              resolved
+          in
           let next = Buffer_int.create 16 in
           closure d next moved false false None;
           let next = Array.to_list (Buffer_int.contents next) in
@@ -483,7 +489,14 @@ let window_ranges table wide =
     runs := merged
   done;
   let r = !runs in
-  (String.init (2 * Array.length r) (fun k -> let lo, hi = r.(k / 2) in Char.chr (if k mod 2 = 0 then lo else hi - lo)), Array.length r)
+  let pairs =
+    String.init
+      (2 * Array.length r)
+      (fun k ->
+        let lo, hi = r.(k / 2) in
+        Char.chr (if k mod 2 = 0 then lo else hi - lo))
+  in
+  (pairs, Array.length r)
 
 (* The window of a tree (after simplify) worth reading one unit of instead of every unit, or None: the units each
    position before a match can end can be, from the pattern's automaton without its determinisation, and the window
@@ -653,7 +666,13 @@ let reverse (prefixes : node array list) =
         while !id < !nsets do
           for cl = 0 to nclasses - 1 do
             let c = sample.(cl) in
-            let moved = List.filter_map (fun i -> let s = nfa.(i) in if s.sk = KSet && in_set s c then Some s.out else None) !sets.(!id) in
+            let moved =
+              List.filter_map
+                (fun i ->
+                  let s = nfa.(i) in
+                  if s.sk = KSet && in_set s c then Some s.out else None)
+                !sets.(!id)
+            in
             let next = closure moved in
             let to_ =
               if next = [] then dead
