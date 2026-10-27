@@ -648,10 +648,39 @@ value cre_teddy_find_byte(value s, value at, value last, value n, value table)
 /* UTF-16 */
 
 /* The first unit at or after from and before n (units from the byte base) of UTF-16LE text that is v, or -1. */
+#if defined(CRE_HAS_TARGETS)
+/* The first unit at or after k and before n that is v, thirty-two units a step, or the place the steps stopped at
+   (*found 0). */
+CRE_TARGET("avx2")
+static intnat index_unit16_avx2(bytes t, intnat k, intnat n, intnat v, int *found)
+{
+    __m256i vv = _mm256_set1_epi16((short)v);
+    for (; k + 32 <= n; k += 32) {
+        __m256i a = _mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i *)(t + 2 * k)), vv);
+        __m256i b = _mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i *)(t + 2 * k + 32)), vv);
+        if (!_mm256_testz_si256(_mm256_or_si256(a, b), _mm256_or_si256(a, b))) {
+            uint32_t ma = (uint32_t)_mm256_movemask_epi8(a);
+            *found = 1;
+            if (ma) return k + (CRE_CTZ32(ma) >> 1);
+            return k + 16 + (CRE_CTZ32((uint32_t)_mm256_movemask_epi8(b)) >> 1);
+        }
+    }
+    *found = 0;
+    return k;
+}
+#endif
+
 intnat cre_index_unit16(value s, intnat base, intnat from, intnat n, intnat v)
 {
     bytes t = TEXT(s) + base;
     intnat k = from;
+#if defined(CRE_HAS_TARGETS)
+    if (has_avx2()) {
+        int found;
+        k = index_unit16_avx2(t, k, n, v, &found);
+        if (found) return k;
+    }
+#endif
 #if defined(CRE_X86)
     __m128i vv = _mm_set1_epi16((short)v);
     for (; k + 8 <= n; k += 8) {
