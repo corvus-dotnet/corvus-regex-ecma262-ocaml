@@ -145,12 +145,35 @@ jobs:
         name: wrong-cases-${{ matrix.os }}-${{ matrix.ocaml }}${{ matrix.variant && format('-{0}', matrix.variant) || '' }}
         path: wrong-cases*.tsv
 
+  s390x:
+    # A big-endian processor with five registers for the arguments of a C call, which opam-repository's CI builds every
+    # package on: the build and the tests in the image it uses, under QEMU (the C kernels' scalar paths, and the passing of
+    # their arguments). The test data is too slow to run under emulation and is run on every native leg above.
+    name: Build and test (OCaml 5.5, s390x under QEMU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+    - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      with:
+        platforms: s390x
+    - name: Build and test
+      run: |
+        docker run --rm --platform linux/s390x -v "$PWD:/src:ro" ocaml/opam:debian-13-ocaml-5.5 sh -ec '
+          cp -r /src /tmp/repo && cd /tmp/repo
+          opam install --yes dune > /dev/null
+          opam exec -- ocamlopt -config-var architecture
+          opam exec -- dune build
+          opam exec -- dune test --force'
+
   gate:
     # The one check of this workflow that the ruleset of main requires: it passes when every job above passed (or was
     # skipped), so a job added here is required with no change to the ruleset.
     name: CI gate
     if: always()
-    needs: [build]
+    needs: [build, s390x]
     runs-on: ubuntu-latest
     steps:
     - name: Every job passed
