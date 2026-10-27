@@ -42,6 +42,13 @@ external ascii_run_end : string -> (int[@untagged]) -> (int[@untagged]) -> strin
   = "cre_ascii_run_end_byte" "cre_ascii_run_end"
 [@@noalloc]
 
+(* ascii_run_end over UTF-16LE text from the byte base: the first unit at or after from and before n that is not an
+   ASCII member of the set, or n. *)
+external ascii_run_end16 :
+  string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged])
+  = "cre_ascii_run_end16_byte" "cre_ascii_run_end16"
+[@@noalloc]
+
 (* The last position in [lo, hi) whose byte is one of count (one to three) bytes of back, or -1. *)
 external last_of : string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged])
   = "cre_last_of_byte" "cre_last_of"

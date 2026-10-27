@@ -992,7 +992,7 @@ let end_of_run (pr : Prog.t) (cs : Charset.t) (t : Units.text) at =
       if Charset.has_ascii cs c then
         (* Over UTF-8 the rest of the run of ASCII members by the kernel, sixteen bytes a step. *)
         if T.utf8 then at := Kernels.ascii_run_end t.s (t.base + !at + 1) (t.base + n) cs.nibbles - t.base
-        else incr at
+        else at := Kernels.ascii_run_end16 t.s t.base (!at + 1) n cs.nibbles
       else fin := true
     else begin
       let p = T.read t !at pr.p.units in

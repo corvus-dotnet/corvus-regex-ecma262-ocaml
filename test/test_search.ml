@@ -512,7 +512,35 @@ let test_index_units16 () =
       (Printf.sprintf "index_units16 from %d over %d units" from n)
   done
 
+(* The UTF-16 form of the ASCII run search (Kernels.ascii_run_end16): random sets, texts with units beyond ASCII (and
+   beyond 0x7FFF), every start. *)
+let test_ascii_run_end16 () =
+  seed := 0x2545F491;
+  for _ = 1 to 300 do
+    let members = Array.init 128 (fun _ -> next () mod 3 <> 0) in
+    let cs =
+      Corvus_regex_ecma262__Charset.make
+        (Array.concat (List.filter_map (fun c -> if members.(c) then Some [| c; c |] else None) (List.init 128 Fun.id)))
+    in
+    let n = next () mod 120 in
+    let units =
+      Array.init n (fun _ ->
+          match next () mod 20 with 0 -> 0x80 + (next () mod 0x7F80) | 1 -> 0x8000 + (next () mod 0x8000) | _ -> next () mod 128)
+    in
+    let b = Bytes.create (2 * n) in
+    Array.iteri (fun k u -> Bytes.set_uint16_le b (2 * k) u) units;
+    let from = if n = 0 then 0 else next () mod n in
+    let k = ref from in
+    while !k < n && units.(!k) < 0x80 && members.(units.(!k)) do
+      incr k
+    done;
+    check
+      (Kernels.ascii_run_end16 (Bytes.to_string b) 0 from n cs.nibbles = !k)
+      (Printf.sprintf "ascii_run_end16 from %d over %d units" from n)
+  done
+
 let () =
+  test_ascii_run_end16 ();
   test_index_units16 ();
   test_ascii_run_end ();
   test_index_run ();
