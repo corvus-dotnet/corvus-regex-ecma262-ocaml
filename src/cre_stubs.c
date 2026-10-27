@@ -187,8 +187,11 @@ value cre_index_byte2_byte(value s, value from, value n, value a, value b)
 }
 
 /* The first position in [from, n) whose byte is one of a, b, c and d (which may repeat), or -1. */
-intnat cre_index_byte4(value s, intnat from, intnat n, intnat a, intnat b, intnat c, intnat d)
+intnat cre_index_byte4(value s, intnat from, intnat n, intnat abcd)
 {
+    /* The four bytes come packed in one argument (Kernels.pack4), so that the call passes four arguments, all in
+       registers, and none on the stack. */
+    intnat a = abcd & 0xFF, b = (abcd >> 8) & 0xFF, c = (abcd >> 16) & 0xFF, d = (abcd >> 24) & 0xFF;
     bytes t = TEXT(s);
     intnat k = from;
 #if defined(CRE_X86)
@@ -216,10 +219,9 @@ intnat cre_index_byte4(value s, intnat from, intnat n, intnat a, intnat b, intna
     return -1;
 }
 
-value cre_index_byte4_byte(value *argv, int argn)
+value cre_index_byte4_byte(value s, value from, value n, value abcd)
 {
-    (void)argn;
-    return Val_long(cre_index_byte4(argv[0], ARG(1), ARG(2), ARG(3), ARG(4), ARG(5), ARG(6)));
+    return Val_long(cre_index_byte4(s, Long_val(from), Long_val(n), Long_val(abcd)));
 }
 
 /* The first position in [from, n) whose byte is in one of nr ranges (one to four), or -1. ranges holds each range as
@@ -268,13 +270,191 @@ value cre_index_ranges_byte(value s, value from, value n, value ranges, value nr
     return Val_long(cre_index_ranges(s, Long_val(from), Long_val(n), ranges, Long_val(nr)));
 }
 
+/* The first position in [from, n) whose byte is not an ASCII member of the set whose nibble bitmap is nib (16 bytes:
+   byte l holds bit h for the member 16 * h + l), or n. A byte at or beyond 0x80 has a high nibble of 8 or more, whose
+   bit is none of the eight, so it ends the run. With a byte shuffle, sixteen bytes a step: the bitmap's byte of each
+   byte's low nibble, and the bit of its high nibble. */
+#if defined(CRE_HAS_TARGETS)
+CRE_TARGET("ssse3")
+static intnat ascii_run_ssse3(bytes t, intnat k, intnat n, bytes nib)
+{
+    __m128i map = _mm_loadu_si128((const __m128i *)nib);
+    __m128i bit = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char)128, 0, 0, 0, 0, 0, 0, 0, 0);
+    __m128i low = _mm_set1_epi8(0x0F), zero = _mm_setzero_si128();
+    for (; k + 16 <= n; k += 16) {
+        __m128i x = _mm_loadu_si128((const __m128i *)(t + k));
+        __m128i row = _mm_shuffle_epi8(map, _mm_and_si128(x, low));
+        __m128i b = _mm_shuffle_epi8(bit, _mm_and_si128(_mm_srli_epi16(x, 4), low));
+        int m = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(row, b), zero));
+        if (m) return k + CRE_CTZ32((uint32_t)m);
+    }
+    return k;
+}
+#endif
+
+intnat cre_ascii_run_end(value s, intnat from, intnat n, value nibbles)
+{
+    bytes t = TEXT(s), nib = TEXT(nibbles);
+    intnat k = from;
+#if defined(CRE_HAS_TARGETS)
+    if (has_ssse3()) {
+        k = ascii_run_ssse3(t, k, n, nib);
+        if (k + 16 <= n) return k;
+    }
+#elif defined(CRE_NEON)
+    {
+        uint8x16_t map = vld1q_u8(nib);
+        static const uint8_t bits[16] = {1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0};
+        uint8x16_t bit = vld1q_u8(bits), low = vdupq_n_u8(0x0F);
+        for (; k + 16 <= n; k += 16) {
+            uint8x16_t x = vld1q_u8(t + k);
+            uint8x16_t row = vqtbl1q_u8(map, vandq_u8(x, low));
+            uint8x16_t b = vqtbl1q_u8(bit, vshrq_n_u8(x, 4));
+            uint64_t m = neon_mask(vceqq_u8(vandq_u8(row, b), vdupq_n_u8(0)));
+            if (m) return k + (CRE_CTZ64(m) >> 2);
+        }
+    }
+#endif
+    for (; k < n; k++) {
+        unsigned char x = t[k];
+        if (x >= 0x80 || !(nib[x & 15] & (1 << (x >> 4)))) return k;
+    }
+    return n;
+}
+
+value cre_ascii_run_end_byte(value s, value from, value n, value nibbles)
+{
+    return Val_long(cre_ascii_run_end(s, Long_val(from), Long_val(n), nibbles));
+}
+
+/* cre_ascii_run_end over UTF-16LE text from the byte base: the first unit at or after from and before n that is not an
+   ASCII member of the set, or n. Sixteen units are packed into bytes with unsigned saturation (a unit at or beyond
+   0x80 stays at or beyond 0x80, which ends the run) and tested as the bytes are. */
+#if defined(CRE_HAS_TARGETS)
+CRE_TARGET("ssse3")
+static intnat ascii_run16_ssse3(bytes t, intnat k, intnat n, bytes nib)
+{
+    __m128i map = _mm_loadu_si128((const __m128i *)nib);
+    __m128i bit = _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, (char)128, 0, 0, 0, 0, 0, 0, 0, 0);
+    __m128i low = _mm_set1_epi8(0x0F), zero = _mm_setzero_si128();
+    for (; k + 16 <= n; k += 16) {
+        __m128i a = _mm_loadu_si128((const __m128i *)(t + 2 * k));
+        __m128i b = _mm_loadu_si128((const __m128i *)(t + 2 * k + 16));
+        /* packus saturates signed words: a unit from 0x80 to 0x7FFF packs to 0x80 or more, and one with its top bit
+           set reads as negative and packs to 0, so it is marked 0xFF from its sign. */
+        __m128i x = _mm_or_si128(_mm_packus_epi16(a, b), _mm_packs_epi16(_mm_srai_epi16(a, 15), _mm_srai_epi16(b, 15)));
+        __m128i row = _mm_shuffle_epi8(map, _mm_and_si128(x, low));
+        __m128i bb = _mm_shuffle_epi8(bit, _mm_and_si128(_mm_srli_epi16(x, 4), low));
+        int m = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_and_si128(row, bb), zero));
+        if (m) return k + CRE_CTZ32((uint32_t)m);
+    }
+    return k;
+}
+#endif
+
+intnat cre_ascii_run_end16(value s, intnat base, intnat from, intnat n, value nibbles)
+{
+    bytes t = TEXT(s) + base, nib = TEXT(nibbles);
+    intnat k = from;
+#if defined(CRE_HAS_TARGETS)
+    if (has_ssse3()) {
+        k = ascii_run16_ssse3(t, k, n, nib);
+        if (k + 16 <= n) return k;
+    }
+#elif defined(CRE_NEON)
+    {
+        uint8x16_t map = vld1q_u8(nib);
+        static const uint8_t bits[16] = {1, 2, 4, 8, 16, 32, 64, 128, 0, 0, 0, 0, 0, 0, 0, 0};
+        uint8x16_t bit = vld1q_u8(bits), low = vdupq_n_u8(0x0F);
+        for (; k + 16 <= n; k += 16) {
+            uint16x8_t a = vreinterpretq_u16_u8(vld1q_u8(t + 2 * k)), b = vreinterpretq_u16_u8(vld1q_u8(t + 2 * k + 16));
+            uint8x16_t x = vcombine_u8(vqmovn_u16(a), vqmovn_u16(b));
+            uint8x16_t row = vqtbl1q_u8(map, vandq_u8(x, low));
+            uint8x16_t bb = vqtbl1q_u8(bit, vshrq_n_u8(x, 4));
+            uint64_t m = neon_mask(vceqq_u8(vandq_u8(row, bb), vdupq_n_u8(0)));
+            if (m) return k + (CRE_CTZ64(m) >> 2);
+        }
+    }
+#endif
+    for (; k < n; k++) {
+        unsigned x = t[2 * k] | (t[2 * k + 1] << 8);
+        if (x >= 0x80 || !(nib[x & 15] & (1 << (x >> 4)))) return k;
+    }
+    return n;
+}
+
+value cre_ascii_run_end16_byte(value s, value base, value from, value n, value nibbles)
+{
+    return Val_long(cre_ascii_run_end16(s, Long_val(base), Long_val(from), Long_val(n), nibbles));
+}
+
+/* The starts of the runs of len set bits (1 to 64) that lie wholly in the 64 bits of m: bit i of the result is set when
+   bits i to i + len - 1 of m are. The runs are found by doubling: a run of 2k bits is a run of k bits whose bit k on is
+   a run of k bits too. */
+static inline uint64_t runs_in(uint64_t m, intnat len)
+{
+    uint64_t a = m;
+    intnat have = 1;
+    while (have * 2 <= len) {
+        a &= a >> have;
+        have *= 2;
+    }
+    if (len > have) a &= a >> (len - have);
+    /* A start whose run would pass the top of the word is not one: the bits above it are not known. */
+    if (len > 1) a &= ~0ULL >> (len - 1);
+    return a;
+}
+
 /* The first position in [from, n) of a run of len bytes (1 to 64), each in one of nr ranges as cre_index_ranges takes
-   them, or -1: the skip window's search, a start having a byte the window holds at each of its places. */
+   them, or -1: the skip window's search, a start having a byte the window holds at each of its places. The vector forms
+   read 64 bytes as a mask, one bit a byte, and find the runs in it (runs_in); the next block starts len - 1 bytes before
+   the end of this one, so every run lies wholly in some block. */
 intnat cre_index_run(value s, intnat from, intnat n, value ranges, intnat nr, intnat len)
 {
     bytes t = TEXT(s), r = TEXT(ranges);
+    intnat k = from;
+#if defined(CRE_X86)
+    __m128i lo[4], w[4];
+    for (int q = 0; q < nr; q++) {
+        lo[q] = _mm_set1_epi8((char)r[2 * q]);
+        w[q] = _mm_set1_epi8((char)r[2 * q + 1]);
+    }
+    for (; k + 64 <= n; k += 64 - len + 1) {
+        uint64_t m = 0;
+        for (int b = 0; b < 4; b++) {
+            __m128i x = _mm_loadu_si128((const __m128i *)(t + k + 16 * b)), any = _mm_setzero_si128();
+            for (int q = 0; q < nr; q++) {
+                __m128i dlt = _mm_sub_epi8(x, lo[q]);
+                any = _mm_or_si128(any, _mm_cmpeq_epi8(_mm_min_epu8(dlt, w[q]), dlt));
+            }
+            m |= (uint64_t)(uint32_t)_mm_movemask_epi8(any) << (16 * b);
+        }
+        uint64_t a = runs_in(m, len);
+        if (a) return k + CRE_CTZ64(a);
+    }
+#elif defined(CRE_NEON)
+    uint8x16_t lo[4], w[4];
+    for (int q = 0; q < nr; q++) {
+        lo[q] = vdupq_n_u8(r[2 * q]);
+        w[q] = vdupq_n_u8(r[2 * q + 1]);
+    }
+    static const uint8_t weights[16] = {1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128};
+    uint8x16_t wt = vld1q_u8(weights);
+    for (; k + 64 <= n; k += 64 - len + 1) {
+        uint64_t m = 0;
+        for (int b = 0; b < 4; b++) {
+            uint8x16_t x = vld1q_u8(t + k + 16 * b), any = vdupq_n_u8(0);
+            for (int q = 0; q < nr; q++) any = vorrq_u8(any, vcleq_u8(vsubq_u8(x, lo[q]), w[q]));
+            uint8x16_t bits = vandq_u8(any, wt);
+            uint64_t half = (uint64_t)vaddv_u8(vget_low_u8(bits)) | ((uint64_t)vaddv_u8(vget_high_u8(bits)) << 8);
+            m |= half << (16 * b);
+        }
+        uint64_t a = runs_in(m, len);
+        if (a) return k + CRE_CTZ64(a);
+    }
+#endif
     intnat run = 0;
-    for (intnat k = from; k < n; k++) {
+    for (; k < n; k++) {
         int hit = 0;
         for (int q = 0; q < nr; q++)
             if ((unsigned char)(t[k] - r[2 * q]) <= r[2 * q + 1]) hit = 1;
@@ -282,12 +462,6 @@ intnat cre_index_run(value s, intnat from, intnat n, value ranges, intnat nr, in
             if (++run >= len) return k - len + 1;
         } else {
             run = 0;
-#if defined(CRE_X86) || defined(CRE_NEON)
-            /* After a byte the window does not hold, a block of 16 that holds none of its bytes is passed whole. */
-            if (k + 1 + 16 <= n && cre_index_ranges(s, k + 1, k + 17, ranges, nr) < 0) {
-                k += 16;
-            }
-#endif
         }
     }
     return -1;
@@ -537,10 +711,39 @@ value cre_teddy_find_byte(value s, value at, value last, value n, value table)
 /* UTF-16 */
 
 /* The first unit at or after from and before n (units from the byte base) of UTF-16LE text that is v, or -1. */
+#if defined(CRE_HAS_TARGETS)
+/* The first unit at or after k and before n that is v, thirty-two units a step, or the place the steps stopped at
+   (*found 0). */
+CRE_TARGET("avx2")
+static intnat index_unit16_avx2(bytes t, intnat k, intnat n, intnat v, int *found)
+{
+    __m256i vv = _mm256_set1_epi16((short)v);
+    for (; k + 32 <= n; k += 32) {
+        __m256i a = _mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i *)(t + 2 * k)), vv);
+        __m256i b = _mm256_cmpeq_epi16(_mm256_loadu_si256((const __m256i *)(t + 2 * k + 32)), vv);
+        if (!_mm256_testz_si256(_mm256_or_si256(a, b), _mm256_or_si256(a, b))) {
+            uint32_t ma = (uint32_t)_mm256_movemask_epi8(a);
+            *found = 1;
+            if (ma) return k + (CRE_CTZ32(ma) >> 1);
+            return k + 16 + (CRE_CTZ32((uint32_t)_mm256_movemask_epi8(b)) >> 1);
+        }
+    }
+    *found = 0;
+    return k;
+}
+#endif
+
 intnat cre_index_unit16(value s, intnat base, intnat from, intnat n, intnat v)
 {
     bytes t = TEXT(s) + base;
     intnat k = from;
+#if defined(CRE_HAS_TARGETS)
+    if (has_avx2()) {
+        int found;
+        k = index_unit16_avx2(t, k, n, v, &found);
+        if (found) return k;
+    }
+#endif
 #if defined(CRE_X86)
     __m128i vv = _mm_set1_epi16((short)v);
     for (; k + 8 <= n; k += 8) {
@@ -563,6 +766,76 @@ intnat cre_index_unit16(value s, intnat base, intnat from, intnat n, intnat v)
 value cre_index_unit16_byte(value s, value base, value from, value n, value v)
 {
     return Val_long(cre_index_unit16(s, Long_val(base), Long_val(from), Long_val(n), Long_val(v)));
+}
+
+/* The first unit at or after from and before n of UTF-16LE text from the byte base that is in one of nr ranges (1 to
+   8), given as 16-bit little-endian pairs of a least unit and a width (hi - lo), or -1. With AVX2 or NEON, sixteen or
+   eight units a step: a unit x is in a range where x - lo, unsigned, is at most the width. */
+#if defined(CRE_HAS_TARGETS)
+CRE_TARGET("avx2")
+static intnat index_units16_avx2(bytes t, intnat k, intnat n, bytes r, intnat nr, int *found)
+{
+    __m256i lo[8], w[8];
+    for (int q = 0; q < nr; q++) {
+        lo[q] = _mm256_set1_epi16((short)(r[4 * q] | (r[4 * q + 1] << 8)));
+        w[q] = _mm256_set1_epi16((short)(r[4 * q + 2] | (r[4 * q + 3] << 8)));
+    }
+    for (; k + 16 <= n; k += 16) {
+        __m256i x = _mm256_loadu_si256((const __m256i *)(t + 2 * k)), any = _mm256_setzero_si256();
+        for (int q = 0; q < nr; q++) {
+            __m256i d = _mm256_sub_epi16(x, lo[q]);
+            any = _mm256_or_si256(any, _mm256_cmpeq_epi16(_mm256_min_epu16(d, w[q]), d));
+        }
+        uint32_t m = (uint32_t)_mm256_movemask_epi8(any);
+        if (m) {
+            *found = 1;
+            return k + (CRE_CTZ32(m) >> 1);
+        }
+    }
+    *found = 0;
+    return k;
+}
+#endif
+
+intnat cre_index_units16(value s, intnat base, intnat from, intnat n, value ranges, intnat nr)
+{
+    bytes t = TEXT(s) + base, r = TEXT(ranges);
+    intnat k = from;
+#if defined(CRE_HAS_TARGETS)
+    if (has_avx2()) {
+        int found;
+        k = index_units16_avx2(t, k, n, r, nr, &found);
+        if (found) return k;
+    }
+#elif defined(CRE_NEON)
+    {
+        uint16x8_t lo[8], w[8];
+        for (int q = 0; q < nr; q++) {
+            lo[q] = vdupq_n_u16((uint16_t)(r[4 * q] | (r[4 * q + 1] << 8)));
+            w[q] = vdupq_n_u16((uint16_t)(r[4 * q + 2] | (r[4 * q + 3] << 8)));
+        }
+        for (; k + 8 <= n; k += 8) {
+            uint16x8_t x = vreinterpretq_u16_u8(vld1q_u8(t + 2 * k)), any = vdupq_n_u16(0);
+            for (int q = 0; q < nr; q++) any = vorrq_u16(any, vcleq_u16(vsubq_u16(x, lo[q]), w[q]));
+            uint64_t m = neon_mask(vreinterpretq_u8_u16(any));
+            if (m) return k + (CRE_CTZ64(m) >> 3);
+        }
+    }
+#endif
+    for (; k < n; k++) {
+        uint16_t x = (uint16_t)(t[2 * k] | (t[2 * k + 1] << 8));
+        for (int q = 0; q < nr; q++) {
+            uint16_t l = (uint16_t)(r[4 * q] | (r[4 * q + 1] << 8)), wd = (uint16_t)(r[4 * q + 2] | (r[4 * q + 3] << 8));
+            if ((uint16_t)(x - l) <= wd) return k;
+        }
+    }
+    return -1;
+}
+
+value cre_index_units16_byte(value *argv, int argn)
+{
+    (void)argn;
+    return Val_long(cre_index_units16(argv[0], ARG(1), ARG(2), ARG(3), argv[4], ARG(5)));
 }
 
 /* Writes the low byte of each of count units of UTF-16LE text from unit from (units from the byte base) into dst, the

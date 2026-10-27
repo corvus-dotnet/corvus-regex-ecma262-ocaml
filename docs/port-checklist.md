@@ -48,15 +48,15 @@ and the 32-byte loads turned off. Where this does a thing another way, or less w
 | 14 | A literal at a fixed distance from the start, the start found by walking back over the characters | done | The windows of item 20, with one distance. |
 | 15 | A literal at a bounded range of distances | done | The windows of item 20. |
 | 16 | A literal after a run of disjoint unbounded loops, with a leading `\b`, the runs walked back to the earliest start | done | `Search.After_loops` (`search_after_loops`), with the crate's 0.2.1 floor. |
-| 17 | Several literals at once, by a cost model of one or two positions | done | Another way, as the Pascal engine: literals whose bytes at one position are up to four rare values, or a range of them, by the search for those bytes (`Finder.Firsts`); literals two of whose positions take four masked tests or fewer by the pair search where they are one word's cases (its candidates need no compare, or each position is one test); any others by Teddy (item 19), and without a byte shuffle by the pair search or `Finder.Table`'s table of the bytes at their rarest position, read a byte at a time. |
+| 17 | Several literals at once, by a cost model of one or two positions | done | Another way, as the Pascal engine: literals whose bytes at one position are up to four rare values, or a range of them, by the search for those bytes (`Finder.Firsts`), except that where the range is of first bytes and the processor has a byte shuffle, Teddy (item 19) takes them, its three bytes turning away the candidates a range of capitals gives; literals two of whose positions take four masked tests or fewer by the pair search where they are one word's cases (its candidates need no compare, or each position is one test); any others by Teddy (item 19), and without a byte shuffle by the pair search or `Finder.Table`'s table of the bytes at their rarest position, read a byte at a time. |
 | 18 | The pairs of first characters of a sequence of classes as a multi-needle | done | Another way, as the crate: a class of up to four characters is one character of an anchor with several forms. |
-| 19 | Fingerprints (Teddy): buckets, nibble tables, up to three positions | done | Teddy is Geoff Langdale's, from Intel's [Hyperscan](https://github.com/intel/hyperscan) (`src/fdr/teddy.c`); the [README of aho-corasick's port](https://github.com/BurntSushi/aho-corasick/blob/master/src/packed/teddy/README.md) describes it in full. `teddy_find` with SSSE3's byte shuffle or NEON's table lookup: eight buckets, the literals' first three bytes (the ASCII letters folded, so a word's cases share a bucket), sixteen starts a step. Each candidate is tested against the bytes of the literals' first sixteen positions and then the literals of its first byte. Without a byte shuffle, `Finder.Table` reads its table a byte at a time. |
+| 19 | Fingerprints (Teddy): buckets, nibble tables, up to three positions | done | Teddy is Geoff Langdale's, from Intel's [Hyperscan](https://github.com/intel/hyperscan) (`src/fdr/teddy.c`); the [README of aho-corasick's port](https://github.com/BurntSushi/aho-corasick/blob/master/src/packed/teddy/README.md) describes it in full. `teddy_find` with SSSE3's byte shuffle or NEON's table lookup: eight buckets, the literals' first three bytes (the ASCII letters folded, so a word's cases share a bucket), sixteen starts a step. Each candidate is tested against the bytes of the literals' first sixteen positions and then the literals of its first two bytes (hashed into 1024 lists), not of its first byte alone, which every Cyrillic literal would share. Without a byte shuffle, `Finder.Table` reads its table a byte at a time. |
 | 20 | The literal every alternative holds, at a fixed or bounded distance, the occurrences opening windows of starts tried in order and never twice | done | `Search.Windows` (`search_windows`), through nested alternations. |
 | 21 | The case-insensitive search: a letter's forms in one search, masks joining the forms that differ in a bit | done | The forms are written out into literals, and the pair search compares the two cases of a letter (or of a Cyrillic lead byte) with one masked test, as the reference joins them. |
 | 22 | The long s and the Kelvin sign, whose UTF-8 is longer than s and k, looked for apart | done | Another way, as the crate: they are forms like any other. Over UTF-16 the packed search takes their low bytes in the one search. |
 | 23 | The fingerprint search's positions chosen by rarity | done | Another way: the pair search and the table choose their positions by `memchr`'s table of byte frequencies (`Finder.byte_rank`). |
 | 24 | The first set found by a vectorised search for its units | done | Over UTF-8 `Search.first_bytes`: one to four bytes, a range, or up to four ranges (the ASCII runs and one run of lead bytes, each candidate then tested against the set) by `index_byte1`, `index_byte2`, `index_byte4` or `index_ranges`; a set of more than four bytes (a class) tested by its table for four bytes before the vector search starts, since the next word starts a byte or two on. |
-| 25 | The same over UTF-16 | done | Another way: the first set's units as up to eight ranges merged as the crate merges them (`Search.first_units_of`); one unit by `index_unit16`, any other set a unit at a time through a table of bits, its blocks of bits each kept once (`Literals.unit_set`). |
+| 25 | The same over UTF-16 | done | Another way: the first set's units as up to eight ranges merged as the crate merges them (`Search.first_units_of`); one unit by `index_unit16`, up to eight ranges by `index_units16` (sixteen units a step with AVX2, eight with NEON) once the next four units have been looked at one by one, and a set of more ranges a unit at a time through a table of bits, its blocks of bits each kept once (`Literals.unit_set`). |
 | 26 | A failed start skips the rest of its leading loop's run | done | `Search.t.skip_run`. |
 | 27 | A start inside a word skipped where the pattern starts with `\b` and every first character is a word character | done | `Search.t.leading_word_boundary`. |
 | 28 | A minimum length rules out short rests | done | `Compile.program.need` and `need16`. |
@@ -121,3 +121,20 @@ on the heap up to it. On each stack it answers the 964 probes as the crate's doe
 590 refused, no fault, on OCaml 4.14 and 5.5 on Linux. The deep probes (the groups, lookarounds, quantified groups and
 classes nested to the limit, one past it and far past it) are answered the same on stacks of 1 MB and of 512 KB. A
 stack that overflows raises `Stack_overflow` or ends the process, which the probe counts as a fault either way.
+
+## The rows still slower than V8
+
+In a measured run of the harness (cores 0 to 11 of a pinned host, the interleaved protocol, 3 rounds of 0.7 s), 3 of
+the 57 Industry workloads are slower than V8 over UTF-8, each counting what V8 counts. The first two are within the
+spread the same run gives V8 itself (up to 9%); Holmes is not:
+
+| Workload | This port (µs) | V8 (µs) | Ratio | Where the time goes |
+|---|--:|--:|--:|---|
+| `zqj` | 5.8 | 5.7 | 1.02 | The search for the z over 595 KB of text. |
+| `the\s+\w+` | 573.5 | 547.0 | 1.05 | The search for the t, then the run of the word after it. |
+| `Holmes` | 17.9 | 15.8 | 1.14 | The search for the H, whose 1,278 places in the text each end a search for 461 matches. |
+
+Over UTF-16, 11 are slower, most of them literal and run searches over English text, which V8 holds as one byte a
+character: it reads half the bytes this port reads in the code units of the text. `zqj` reads 1.2 MB in 18 µs, about
+as fast as the cache delivers it. The slowest are `zqj` (3.17), `IPv4 addresses` (2.14), `Holmes` (2.08), `The` (1.43),
+`the\s+\w+` (1.37), `\p{Lu}` (1.37) and `Twain` (1.28).

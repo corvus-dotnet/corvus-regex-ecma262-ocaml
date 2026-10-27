@@ -6,6 +6,10 @@
    The UTF-8 searches take the text as a string and absolute offsets; the UTF-16 searches take a text (Units.text) and
    positions in its units. *)
 
+(* min and max on ints: the library's are polymorphic, and without flambda each call compares through compare_val. *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 (* The most units of a literal the packed search takes, so that the chunks' overlap stays short. *)
 let packed_longest = 64
 
@@ -300,10 +304,25 @@ type unit_set = {
   has_blocks : bool;
   block_of : int array;
   blocks : string;
+  (* Up to eight ranges as Kernels.index_units16 reads them (16-bit pairs of a least unit and a width), and their
+     number, 0 for a set of more ranges, which is searched a unit at a time. *)
+  kranges : string;
+  nkr : int;
 }
 
 let unit_set (ranges : int array) =
   let one = if Array.length ranges = 2 && ranges.(0) = ranges.(1) then ranges.(0) else -1 in
+  let npairs = Array.length ranges / 2 in
+  let nkr = if npairs <= 8 then npairs else 0 in
+  let kranges =
+    let b = Bytes.create (4 * nkr) in
+    for q = 0 to nkr - 1 do
+      let lo = min 0xFFFF ranges.(2 * q) and hi = min 0xFFFF ranges.((2 * q) + 1) in
+      Bytes.set_uint16_le b (4 * q) lo;
+      Bytes.set_uint16_le b ((4 * q) + 2) (hi - lo)
+    done;
+    Bytes.to_string b
+  in
   if Array.length ranges > 2 then begin
     let all = Array.init 256 (fun _ -> Bytes.make 32 '\000') in
     let k = ref 0 in
@@ -328,9 +347,17 @@ let unit_set (ranges : int array) =
               List.length !distinct - 1)
         all
     in
-    { ranges; one; has_blocks = true; block_of; blocks = Bytes.to_string (Bytes.concat Bytes.empty !distinct) }
+    {
+      ranges;
+      one;
+      has_blocks = true;
+      block_of;
+      blocks = Bytes.to_string (Bytes.concat Bytes.empty !distinct);
+      kranges;
+      nkr;
+    }
   end
-  else { ranges; one; has_blocks = false; block_of = [||]; blocks = "" }
+  else { ranges; one; has_blocks = false; block_of = [||]; blocks = ""; kranges; nkr }
 
 let[@inline] unit_in s u =
   if s.has_blocks then
@@ -341,6 +368,15 @@ let[@inline] unit_in s u =
 (* The first unit at or after from of UTF-16 text in the set, or -1. *)
 let unit_find s (t : Units.text) from =
   if s.one >= 0 then Kernels.index_unit16 t.s t.base from t.len s.one
+  else if s.nkr > 0 then begin
+    (* The next four units a unit at a time before the kernel is called: where most units are members (a letter class
+       over text) a call costs more than it passes over. *)
+    let e = min t.len (from + 4) and k = ref from in
+    while !k < e && not (unit_in s (Units.Units16.get t !k)) do
+      incr k
+    done;
+    if !k < e then !k else if e >= t.len then -1 else Kernels.index_units16 t.s t.base e t.len s.kranges s.nkr
+  end
   else begin
     let at = ref from and found = ref (-1) in
     while !found < 0 && !at < t.len do

@@ -427,7 +427,123 @@ let test_without_vectors () =
   Kernels.has_shuffle := shuffle;
   Kernels.has_wide := wide
 
+(* The skip window's run search (Kernels.index_run) finds what a plain search for the first run finds: random texts of a
+   few byte values, random ranges, every length of run from 1 to 64 and every start. *)
+let test_index_run () =
+  seed := 0x5DEECE66D;
+  let reference s from n (ranges : string) nr len =
+    let in_ranges c =
+      let hit = ref false in
+      for q = 0 to nr - 1 do
+        if (c - Char.code ranges.[2 * q]) land 0xFF <= Char.code ranges.[(2 * q) + 1] then hit := true
+      done;
+      !hit
+    in
+    let run = ref 0 and found = ref (-1) and k = ref from in
+    while !found < 0 && !k < n do
+      if in_ranges (Char.code s.[!k]) then begin
+        incr run;
+        if !run >= len then found := !k - len + 1
+      end
+      else run := 0;
+      incr k
+    done;
+    !found
+  in
+  for _ = 1 to 300 do
+    let n = next () mod 400 in
+    let alphabet = "ab1-9 \x80\xff" in
+    let s = String.init n (fun _ -> alphabet.[next () mod String.length alphabet]) in
+    let nr = 1 + (next () mod 4) in
+    let ranges = String.init (2 * nr) (fun k -> Char.chr (if k mod 2 = 0 then next () mod 256 else next () mod 64)) in
+    let len = 1 + (next () mod 64) in
+    let from = if n = 0 then 0 else next () mod n in
+    check
+      (Kernels.index_run s from n ranges nr len = reference s from n ranges nr len)
+      (Printf.sprintf "index_run of a run of %d from %d over %d bytes" len from n)
+  done
+
+(* The end of a run of a set's ASCII members (Kernels.ascii_run_end) is where a plain loop stops: random sets, texts that
+   hold bytes beyond ASCII, every start. *)
+let test_ascii_run_end () =
+  seed := 0x1234567;
+  for _ = 1 to 300 do
+    let members = Array.init 128 (fun _ -> next () mod 3 <> 0) in
+    let cs =
+      Corvus_regex_ecma262__Charset.make
+        (Array.concat (List.filter_map (fun c -> if members.(c) then Some [| c; c |] else None) (List.init 128 Fun.id)))
+    in
+    let n = next () mod 200 in
+    let s = String.init n (fun _ -> Char.chr (if next () mod 20 = 0 then 0x80 + (next () mod 128) else next () mod 128)) in
+    let from = if n = 0 then 0 else next () mod n in
+    let k = ref from in
+    while !k < n && Char.code s.[!k] < 0x80 && members.(Char.code s.[!k]) do
+      incr k
+    done;
+    check
+      (Kernels.ascii_run_end s from n cs.nibbles = !k)
+      (Printf.sprintf "ascii_run_end from %d over %d bytes" from n)
+  done
+
+(* The search for ranges of UTF-16 units (Kernels.index_units16) finds what a plain loop finds: random texts and up to
+   eight random ranges, every start. *)
+let test_index_units16 () =
+  seed := 0x9E3779B9;
+  for _ = 1 to 300 do
+    let n = next () mod 120 in
+    let units = Array.init n (fun _ -> if next () mod 4 = 0 then next () mod 0x10000 else 0x40 + (next () mod 64)) in
+    let b = Bytes.create (2 * n) in
+    Array.iteri (fun k u -> Bytes.set_uint16_le b (2 * k) u) units;
+    let nr = 1 + (next () mod 8) in
+    let pairs = Array.init nr (fun _ -> let lo = next () mod 0x10000 in (lo, min 0xFFFF (lo + (next () mod 40)))) in
+    let r = Bytes.create (4 * nr) in
+    Array.iteri
+      (fun q (lo, hi) ->
+        Bytes.set_uint16_le r (4 * q) lo;
+        Bytes.set_uint16_le r ((4 * q) + 2) (hi - lo))
+      pairs;
+    let from = if n = 0 then 0 else next () mod n in
+    let k = ref from and found = ref (-1) in
+    while !found < 0 && !k < n do
+      if Array.exists (fun (lo, hi) -> units.(!k) >= lo && units.(!k) <= hi) pairs then found := !k else incr k
+    done;
+    check
+      (Kernels.index_units16 (Bytes.to_string b) 0 from n (Bytes.to_string r) nr = !found)
+      (Printf.sprintf "index_units16 from %d over %d units" from n)
+  done
+
+(* The UTF-16 form of the ASCII run search (Kernels.ascii_run_end16): random sets, texts with units beyond ASCII (and
+   beyond 0x7FFF), every start. *)
+let test_ascii_run_end16 () =
+  seed := 0x2545F491;
+  for _ = 1 to 300 do
+    let members = Array.init 128 (fun _ -> next () mod 3 <> 0) in
+    let cs =
+      Corvus_regex_ecma262__Charset.make
+        (Array.concat (List.filter_map (fun c -> if members.(c) then Some [| c; c |] else None) (List.init 128 Fun.id)))
+    in
+    let n = next () mod 120 in
+    let units =
+      Array.init n (fun _ ->
+          match next () mod 20 with 0 -> 0x80 + (next () mod 0x7F80) | 1 -> 0x8000 + (next () mod 0x8000) | _ -> next () mod 128)
+    in
+    let b = Bytes.create (2 * n) in
+    Array.iteri (fun k u -> Bytes.set_uint16_le b (2 * k) u) units;
+    let from = if n = 0 then 0 else next () mod n in
+    let k = ref from in
+    while !k < n && units.(!k) < 0x80 && members.(units.(!k)) do
+      incr k
+    done;
+    check
+      (Kernels.ascii_run_end16 (Bytes.to_string b) 0 from n cs.nibbles = !k)
+      (Printf.sprintf "ascii_run_end16 from %d over %d units" from n)
+  done
+
 let () =
+  test_ascii_run_end16 ();
+  test_index_units16 ();
+  test_ascii_run_end ();
+  test_index_run ();
   test_searches_find_what_every_position_finds ();
   test_starts_the_fuzzer_found ();
   test_rare_literal ();

@@ -13,17 +13,13 @@ external index_byte2 :
   = "cre_index_byte2_byte" "cre_index_byte2"
 [@@noalloc]
 
-(* The first position in [from, n) whose byte is one of four (which may repeat), or -1. *)
-external index_byte4 :
-  string ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) = "cre_index_byte4_byte" "cre_index_byte4"
+(* The first position in [from, n) whose byte is one of four (which may repeat), packed into one int by pack4, or -1:
+   four arguments, which a call passes in registers. *)
+external index_byte4 : string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged])
+  = "cre_index_byte4_byte" "cre_index_byte4"
 [@@noalloc]
+
+let[@inline] pack4 a b c d = a lor (b lsl 8) lor (c lsl 16) lor (d lsl 24)
 
 (* The first position in [from, n) whose byte is in one of nr ranges, given as a least byte and a width each, or -1. *)
 external index_ranges : string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged])
@@ -34,6 +30,19 @@ external index_ranges : string -> (int[@untagged]) -> (int[@untagged]) -> string
 external index_run :
   string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged])
   = "cre_index_run_byte" "cre_index_run"
+[@@noalloc]
+
+(* The first position in [from, n) whose byte is not an ASCII member of a set given as its nibble bitmap
+   (Charset.t.nibbles), or n: the end of a run of the set's ASCII members, a byte beyond ASCII ending it too. *)
+external ascii_run_end : string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged])
+  = "cre_ascii_run_end_byte" "cre_ascii_run_end"
+[@@noalloc]
+
+(* ascii_run_end over UTF-16LE text from the byte base: the first unit at or after from and before n that is not an
+   ASCII member of the set, or n. *)
+external ascii_run_end16 :
+  string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged])
+  = "cre_ascii_run_end16_byte" "cre_ascii_run_end16"
 [@@noalloc]
 
 (* The last position in [lo, hi) whose byte is one of count (one to three) bytes of back, or -1. *)
@@ -79,6 +88,13 @@ external teddy_find :
 external index_unit16 :
   string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged])
   = "cre_index_unit16_byte" "cre_index_unit16"
+[@@noalloc]
+
+(* The first unit at or after from and before n of UTF-16LE text from the byte base that is in one of nr ranges (1 to 8),
+   given as 16-bit little-endian pairs of a least unit and a width, or -1. *)
+external index_units16 :
+  string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged])
+  = "cre_index_units16_byte" "cre_index_units16"
 [@@noalloc]
 
 (* Writes the low byte of count units of UTF-16LE text from unit from (from the byte base) into dst. *)

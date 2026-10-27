@@ -7,6 +7,10 @@
    Every search takes the text as a string and the end of what it may read, and returns where the first literal found
    starts, in the pattern's order of those that start there, writing where it ends into out.(0); or -1. *)
 
+(* min and max on ints: the library's are polymorphic, and without flambda each call compares through compare_val. *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 (* ByteRank is how common each byte is in text, from 0 (rare) to 255: the table memchr::memmem ranks a needle's bytes by
    (memchr 2.8, arch/all/packedpair/default_rank.rs; MIT or Unlicense), which pair8.rs takes. *)
 let byte_rank =
@@ -130,11 +134,29 @@ let starts_with s at end_ lit =
   let len = String.length lit in
   if at < 0 || end_ - at < len then false
   else begin
-    let k = ref 0 in
-    while !k < len && String.unsafe_get s (at + !k) = String.unsafe_get lit !k do
-      incr k
-    done;
-    !k = len
+    if len < 16 || String.unsafe_get s at <> String.unsafe_get lit 0
+       || String.unsafe_get s (at + 1) <> String.unsafe_get lit 1 then begin
+      let k = ref 0 in
+      while !k < len && String.unsafe_get s (at + !k) = String.unsafe_get lit !k do
+        incr k
+      done;
+      !k = len
+    end
+    else begin
+      (* A literal of sixteen bytes or more whose first two bytes agree, eight bytes at a time from its third (an
+         unboxed load on a 64-bit compiler), then the rest a byte at a time. Most candidates differ at the first or
+         second byte, which a load of eight would cost more than, and a shorter literal (Huckleberry, 11 bytes) gained
+         nothing from it in an A/B and lost 5%; Шерлок Холмс (23 bytes) goes from 52 us to 38 us. *)
+      let k = ref 2 and same = ref true in
+      while !same && !k + 8 <= len do
+        if Int64.equal (String.get_int64_ne s (at + !k)) (String.get_int64_ne lit !k) then k := !k + 8
+        else same := false
+      done;
+      while !same && !k < len do
+        if String.unsafe_get s (at + !k) = String.unsafe_get lit !k then incr k else same := false
+      done;
+      !same
+    end
   end
 
 (* A set of bytes as 256 booleans in a string, a byte '\001' for a member. *)
@@ -209,8 +231,11 @@ type t =
       tk : int;
       at : string;
       tshortest : int;
-      (* The literals by their first byte, in the pattern's order. *)
+      (* The literals by their first two bytes (two_bytes, where every literal has two), hashed into 1024 lists, or by
+         their first byte, in the pattern's order: a candidate is compared with its list alone. By the first byte alone,
+         every Cyrillic literal would share the lead byte D0 or D1. *)
       by_first : string array array;
+      two_bytes : bool;
       (* For each of the first bytes of the literals (up to pair_checked), the values they hold there. *)
       tsets : string array;
       (* The nibble tables of the literals' first three bytes as Teddy reads them, or "" without a byte shuffle. *)
@@ -359,6 +384,14 @@ let teddy_tables (literals : string array) shortest =
     literals;
   Bytes.to_string t
 
+(* The list of a table finder's literals that a candidate whose first two bytes are b0 and b1 is compared with. *)
+let[@inline] table_key b0 b1 = ((b0 lsl 3) lxor b1) land 1023
+
+(* The list a candidate at q is compared with. A candidate starts at least tshortest bytes before the end, so its second
+   byte is there when two_bytes. A function of its own, not a closure, so that a search makes none. *)
+let[@inline] table_list (by_first : string array array) two_bytes s q =
+  if two_bytes then by_first.(table_key (byte s q) (byte s (q + 1))) else by_first.(byte s q)
+
 let build_table (literals : string array) (rank : int array) =
   let shortest = shortest_of literals in
   let best_k = ref 0 and best_cost = ref max_int in
@@ -370,9 +403,12 @@ let build_table (literals : string array) (rank : int array) =
     end
   done;
   let k = !best_k in
-  let by_first = Array.make 256 [||] in
-  for b = 0 to 255 do
-    by_first.(b) <- Array.of_list (List.filter (fun l -> byte l 0 = b) (Array.to_list literals))
+  let two_bytes = shortest >= 2 in
+  let size = if two_bytes then 1024 else 256 in
+  let key l = if two_bytes then table_key (byte l 0) (byte l 1) else byte l 0 in
+  let by_first = Array.make size [||] in
+  for b = 0 to size - 1 do
+    by_first.(b) <- Array.of_list (List.filter (fun l -> key l = b) (Array.to_list literals))
   done;
   let nsets = min shortest pair_checked in
   Table
@@ -381,6 +417,7 @@ let build_table (literals : string array) (rank : int array) =
       at = set_of_bytes (Array.to_list (Array.map (fun l -> byte l k) literals));
       tshortest = shortest;
       by_first;
+      two_bytes;
       tsets = Array.init nsets (fun j -> set_of_bytes (Array.to_list (Array.map (fun l -> byte l j) literals)));
       tab = (if !Kernels.has_shuffle then teddy_tables literals shortest else "");
     }
@@ -439,6 +476,10 @@ let build (literals : string array) (rank : int array) =
   end
   else
     match build_firsts literals rank with
+    (* Literals whose first bytes are a range (the capitals of a list of names) go to Teddy where there is a byte
+       shuffle: every capital of the text is a candidate of the range, and Teddy's three bytes turn nearly all of them
+       away (Sherlock|Holmes|Watson|Irene|Adler|John|Baker, 239 us to 71 us; V8 223 us). *)
+    | Some (Firsts { count = -1; _ }) when !Kernels.has_shuffle && shortest_of literals >= 3 -> build_table literals rank
     | Some f -> f
     | None -> (
         (* Several literals with no rare first bytes go to Teddy where the processor has a byte shuffle, as the crate
@@ -508,7 +549,7 @@ let find f s from end_ (out : int array) =
           match count with
           | 1 -> Kernels.index_byte1 s !at end_ a
           | 2 -> Kernels.index_byte2 s !at end_ a b
-          | 3 | 4 -> Kernels.index_byte4 s !at end_ a b c d
+          | 3 | 4 -> Kernels.index_byte4 s !at end_ (Kernels.pack4 a b c d)
           | _ -> Kernels.index_ranges s !at end_ franges 1
         in
         if q < 0 then at := end_
@@ -538,7 +579,7 @@ let find f s from end_ (out : int array) =
         end
       done;
       !found
-  | Table { tk; at; tshortest; by_first; tsets; tab } ->
+  | Table { tk; at; tshortest; by_first; two_bytes; tsets; tab } ->
       let last = end_ - tshortest and found = ref (-1) and q = ref from in
       if tab <> "" then
         (* Teddy: each candidate is compared with the literals of its first byte. *)
@@ -546,7 +587,7 @@ let find f s from end_ (out : int array) =
           let c = Kernels.teddy_find s !q last end_ tab in
           if c < 0 then q := last + 1
           else begin
-            let e = literal_at_sets s c end_ tsets false tshortest by_first.(byte s c) in
+            let e = literal_at_sets s c end_ tsets false tshortest (table_list by_first two_bytes s c) in
             if e >= 0 then begin
               found := c;
               out.(0) <- e
@@ -558,7 +599,7 @@ let find f s from end_ (out : int array) =
         (* The table of the bytes at the rarest position, read a byte at a time. *)
         while !found < 0 && !q <= last do
           if in_set at (byte s (!q + tk)) then begin
-            let e = literal_at_sets s !q end_ tsets false tshortest by_first.(byte s !q) in
+            let e = literal_at_sets s !q end_ tsets false tshortest (table_list by_first two_bytes s !q) in
             if e >= 0 then begin
               found := !q;
               out.(0) <- e

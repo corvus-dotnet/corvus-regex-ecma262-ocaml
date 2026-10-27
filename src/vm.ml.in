@@ -6,6 +6,10 @@
 open Compile
 open Vm_state
 
+(* min and max on ints: the library's are polymorphic, and without flambda each call compares through compare_val. *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 let[@inline] rune_of p = p lsr 3
 let[@inline] width_of p = p land 7
 
@@ -870,7 +874,7 @@ let first_find (pr : Prog.t) (t : Units.text) at pass_pairs =
         let s = t.s and base = t.base and n = t.len in
         if f.fcount = 1 then rel base (Kernels.index_byte1 s (base + at) (base + n) f.a)
         else if f.fcount = 2 then rel base (Kernels.index_byte2 s (base + at) (base + n) f.a f.b)
-        else if f.fcount <= 4 then rel base (Kernels.index_byte4 s (base + at) (base + n) f.a f.b f.c f.d)
+        else if f.fcount <= 4 then rel base (Kernels.index_byte4 s (base + at) (base + n) (Kernels.pack4 f.a f.b f.c f.d))
         else begin
           (* More than four first bytes are a class (a word's letters, which the next word starts with a byte or two
              on): the next four bytes by the table, before a vector search is set up. *)
@@ -914,7 +918,7 @@ let run_end_of (s : Search.t) (t : Units.text) at =
             let f =
               if count = 1 then Kernels.index_byte1 s (base + at) (base + n) a
               else if count = 2 then Kernels.index_byte2 s (base + at) (base + n) a b
-              else Kernels.index_byte4 s (base + at) (base + n) a b c c
+              else Kernels.index_byte4 s (base + at) (base + n) (Kernels.pack4 a b c c)
             in
             if f < 0 then n else f - base
           end
@@ -926,7 +930,7 @@ let run_end_of (s : Search.t) (t : Units.text) at =
             let s = t.s and base = t.base and n = t.len in
             let j = ref at and result = ref (-1) in
             while !result < 0 do
-              let q = Kernels.index_byte4 s (base + !j) (base + n) 10 13 0xE2 0xE2 in
+              let q = Kernels.index_byte4 s (base + !j) (base + n) (Kernels.pack4 10 13 0xE2 0xE2) in
               if q < 0 then result := n
               else begin
                 let q = q - base in
@@ -984,7 +988,12 @@ let end_of_run (pr : Prog.t) (cs : Charset.t) (t : Units.text) at =
   let n = t.len and at = ref at and fin = ref false in
   while (not !fin) && !at < n do
     let c = T.get t !at in
-    if c < 0x80 then if Charset.has_ascii cs c then incr at else fin := true
+    if c < 0x80 then
+      if Charset.has_ascii cs c then
+        (* Over UTF-8 the rest of the run of ASCII members by the kernel, sixteen bytes a step. *)
+        if T.utf8 then at := Kernels.ascii_run_end t.s (t.base + !at + 1) (t.base + n) cs.nibbles - t.base
+        else at := Kernels.ascii_run_end16 t.s t.base (!at + 1) n cs.nibbles
+      else fin := true
     else begin
       let p = T.read t !at pr.p.units in
       if Charset.contains cs (rune_of p) then at := !at + width_of p else fin := true
