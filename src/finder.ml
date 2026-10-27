@@ -227,8 +227,11 @@ type t =
       tk : int;
       at : string;
       tshortest : int;
-      (* The literals by their first byte, in the pattern's order. *)
+      (* The literals by their first two bytes (two_bytes, where every literal has two), hashed into 1024 lists, or by
+         their first byte, in the pattern's order: a candidate is compared with its list alone. By the first byte alone,
+         every Cyrillic literal would share the lead byte D0 or D1. *)
       by_first : string array array;
+      two_bytes : bool;
       (* For each of the first bytes of the literals (up to pair_checked), the values they hold there. *)
       tsets : string array;
       (* The nibble tables of the literals' first three bytes as Teddy reads them, or "" without a byte shuffle. *)
@@ -377,6 +380,14 @@ let teddy_tables (literals : string array) shortest =
     literals;
   Bytes.to_string t
 
+(* The list of a table finder's literals that a candidate whose first two bytes are b0 and b1 is compared with. *)
+let[@inline] table_key b0 b1 = ((b0 lsl 3) lxor b1) land 1023
+
+(* The list a candidate at q is compared with. A candidate starts at least tshortest bytes before the end, so its second
+   byte is there when two_bytes. A function of its own, not a closure, so that a search makes none. *)
+let[@inline] table_list (by_first : string array array) two_bytes s q =
+  if two_bytes then by_first.(table_key (byte s q) (byte s (q + 1))) else by_first.(byte s q)
+
 let build_table (literals : string array) (rank : int array) =
   let shortest = shortest_of literals in
   let best_k = ref 0 and best_cost = ref max_int in
@@ -388,9 +399,12 @@ let build_table (literals : string array) (rank : int array) =
     end
   done;
   let k = !best_k in
-  let by_first = Array.make 256 [||] in
-  for b = 0 to 255 do
-    by_first.(b) <- Array.of_list (List.filter (fun l -> byte l 0 = b) (Array.to_list literals))
+  let two_bytes = shortest >= 2 in
+  let size = if two_bytes then 1024 else 256 in
+  let key l = if two_bytes then table_key (byte l 0) (byte l 1) else byte l 0 in
+  let by_first = Array.make size [||] in
+  for b = 0 to size - 1 do
+    by_first.(b) <- Array.of_list (List.filter (fun l -> key l = b) (Array.to_list literals))
   done;
   let nsets = min shortest pair_checked in
   Table
@@ -399,6 +413,7 @@ let build_table (literals : string array) (rank : int array) =
       at = set_of_bytes (Array.to_list (Array.map (fun l -> byte l k) literals));
       tshortest = shortest;
       by_first;
+      two_bytes;
       tsets = Array.init nsets (fun j -> set_of_bytes (Array.to_list (Array.map (fun l -> byte l j) literals)));
       tab = (if !Kernels.has_shuffle then teddy_tables literals shortest else "");
     }
@@ -560,7 +575,7 @@ let find f s from end_ (out : int array) =
         end
       done;
       !found
-  | Table { tk; at; tshortest; by_first; tsets; tab } ->
+  | Table { tk; at; tshortest; by_first; two_bytes; tsets; tab } ->
       let last = end_ - tshortest and found = ref (-1) and q = ref from in
       if tab <> "" then
         (* Teddy: each candidate is compared with the literals of its first byte. *)
@@ -568,7 +583,7 @@ let find f s from end_ (out : int array) =
           let c = Kernels.teddy_find s !q last end_ tab in
           if c < 0 then q := last + 1
           else begin
-            let e = literal_at_sets s c end_ tsets false tshortest by_first.(byte s c) in
+            let e = literal_at_sets s c end_ tsets false tshortest (table_list by_first two_bytes s c) in
             if e >= 0 then begin
               found := c;
               out.(0) <- e
@@ -580,7 +595,7 @@ let find f s from end_ (out : int array) =
         (* The table of the bytes at the rarest position, read a byte at a time. *)
         while !found < 0 && !q <= last do
           if in_set at (byte s (!q + tk)) then begin
-            let e = literal_at_sets s !q end_ tsets false tshortest by_first.(byte s !q) in
+            let e = literal_at_sets s !q end_ tsets false tshortest (table_list by_first two_bytes s !q) in
             if e >= 0 then begin
               found := !q;
               out.(0) <- e
