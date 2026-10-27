@@ -457,6 +457,10 @@ let build (literals : string array) (rank : int array) =
   end
   else
     match build_firsts literals rank with
+    (* Literals whose first bytes are a range (the capitals of a list of names) go to Teddy where there is a byte
+       shuffle: every capital of the text is a candidate of the range, and Teddy's three bytes turn nearly all of them
+       away (Sherlock|Holmes|Watson|Irene|Adler|John|Baker, 239 us to 71 us; V8 223 us). *)
+    | Some (Firsts { count = -1; _ }) when !Kernels.has_shuffle && shortest_of literals >= 3 -> build_table literals rank
     | Some f -> f
     | None -> (
         (* Several literals with no rare first bytes go to Teddy where the processor has a byte shuffle, as the crate
