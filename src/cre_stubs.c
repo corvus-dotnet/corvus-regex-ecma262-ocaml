@@ -409,8 +409,11 @@ static inline uint64_t runs_in(uint64_t m, intnat len)
    them, or -1: the skip window's search, a start having a byte the window holds at each of its places. The vector forms
    read 64 bytes as a mask, one bit a byte, and find the runs in it (runs_in); the next block starts len - 1 bytes before
    the end of this one, so every run lies wholly in some block. */
-intnat cre_index_run(value s, intnat from, intnat n, value ranges, intnat nr, intnat len)
+intnat cre_index_run(value s, intnat from, intnat n, value ranges, intnat nr_len)
 {
+    /* The number of ranges and the length of the run come packed in one argument (nr | len << 8), so that the call
+       passes five arguments, all in registers on every ABI (Kernels.index_run). */
+    intnat nr = nr_len & 0xFF, len = nr_len >> 8;
     bytes t = TEXT(s), r = TEXT(ranges);
     intnat k = from;
 #if defined(CRE_X86)
@@ -467,10 +470,9 @@ intnat cre_index_run(value s, intnat from, intnat n, value ranges, intnat nr, in
     return -1;
 }
 
-value cre_index_run_byte(value *argv, int argn)
+value cre_index_run_byte(value s, value from, value n, value ranges, value nr_len)
 {
-    (void)argn;
-    return Val_long(cre_index_run(argv[0], ARG(1), ARG(2), argv[3], ARG(4), ARG(5)));
+    return Val_long(cre_index_run(s, Long_val(from), Long_val(n), ranges, Long_val(nr_len)));
 }
 
 /* The last position in [lo, hi) whose byte is one of the count (one to three) bytes of back, or -1: the give-back of
@@ -495,8 +497,12 @@ value cre_last_of_byte(value s, value lo, value hi, value back, value count)
 /* The first start in [at, last] whose byte at i passes one of ni tests and whose byte at j passes one of nj, or -1.
    tests holds each test as two bytes, a mask and a value, a byte x passing where (x | mask) == value: the ni tests of
    i, then the nj of j (each one to four). Every byte read is below n. */
-intnat cre_pair_find(value s, intnat at, intnat last, intnat n, intnat i, intnat j, value tests, intnat ni, intnat nj)
+intnat cre_pair_find(value s, intnat at, intnat n, intnat packed, value tests)
 {
+    /* The positions, the numbers of tests and the shortest literal's length come packed in one argument
+       (i | j << 16 | ni << 32 | nj << 36 | shortest << 40), so that the call passes five arguments (Kernels.pair_find). */
+    intnat i = packed & 0xFFFF, j = (packed >> 16) & 0xFFFF, ni = (packed >> 32) & 0xF, nj = (packed >> 36) & 0xF;
+    intnat last = n - (packed >> 40);
     bytes t = TEXT(s), q = TEXT(tests);
     intnat reach = i > j ? i : j;
     intnat st = at;
@@ -543,10 +549,9 @@ intnat cre_pair_find(value s, intnat at, intnat last, intnat n, intnat i, intnat
     return -1;
 }
 
-value cre_pair_find_byte(value *argv, int argn)
+value cre_pair_find_byte(value s, value at, value n, value packed, value tests)
 {
-    (void)argn;
-    return Val_long(cre_pair_find(argv[0], ARG(1), ARG(2), ARG(3), ARG(4), ARG(5), argv[6], ARG(7), ARG(8)));
+    return Val_long(cre_pair_find(s, Long_val(at), Long_val(n), Long_val(packed), tests));
 }
 
 /* The first start in [at, last] whose byte at i is a and whose byte at j is b, or -1 (memchr's search for the two
@@ -573,8 +578,11 @@ static intnat eq2_avx2(bytes t, intnat st, intnat last, intnat n, intnat i, intn
 }
 #endif
 
-intnat cre_eq2_find(value s, intnat at, intnat last, intnat n, intnat i, intnat j, intnat a, intnat b)
+intnat cre_eq2_find(value s, intnat at, intnat last, intnat n, intnat packed)
 {
+    /* The positions and the two bytes come packed in one argument (i | j << 16 | a << 32 | b << 40), so that the call
+       passes five arguments (Kernels.eq2_find). */
+    intnat i = packed & 0xFFFF, j = (packed >> 16) & 0xFFFF, a = (packed >> 32) & 0xFF, b = (packed >> 40) & 0xFF;
     bytes t = TEXT(s);
     intnat reach = i > j ? i : j;
     intnat st = at;
@@ -612,10 +620,9 @@ intnat cre_eq2_find(value s, intnat at, intnat last, intnat n, intnat i, intnat 
     return -1;
 }
 
-value cre_eq2_find_byte(value *argv, int argn)
+value cre_eq2_find_byte(value s, value at, value last, value n, value packed)
 {
-    (void)argn;
-    return Val_long(cre_eq2_find(argv[0], ARG(1), ARG(2), ARG(3), ARG(4), ARG(5), ARG(6), ARG(7)));
+    return Val_long(cre_eq2_find(s, Long_val(at), Long_val(last), Long_val(n), Long_val(packed)));
 }
 
 /* ---------------------------------------------------------------------------------------------------------------- */
@@ -797,8 +804,10 @@ static intnat index_units16_avx2(bytes t, intnat k, intnat n, bytes r, intnat nr
 }
 #endif
 
-intnat cre_index_units16(value s, intnat base, intnat from, intnat n, value ranges, intnat nr)
+intnat cre_index_units16(value s, intnat base, intnat from, intnat n, value ranges)
 {
+    /* The number of ranges is the length of their string over four, so that the call passes five arguments. */
+    intnat nr = (intnat)(caml_string_length(ranges) / 4);
     bytes t = TEXT(s) + base, r = TEXT(ranges);
     intnat k = from;
 #if defined(CRE_HAS_TARGETS)
@@ -832,10 +841,9 @@ intnat cre_index_units16(value s, intnat base, intnat from, intnat n, value rang
     return -1;
 }
 
-value cre_index_units16_byte(value *argv, int argn)
+value cre_index_units16_byte(value s, value base, value from, value n, value ranges)
 {
-    (void)argn;
-    return Val_long(cre_index_units16(argv[0], ARG(1), ARG(2), ARG(3), argv[4], ARG(5)));
+    return Val_long(cre_index_units16(s, Long_val(base), Long_val(from), Long_val(n), ranges));
 }
 
 /* Writes the low byte of each of count units of UTF-16LE text from unit from (units from the byte base) into dst, the

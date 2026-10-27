@@ -13,6 +13,10 @@ let[@inline] max (a : int) b = if a >= b then a else b
 
 (* ByteRank is how common each byte is in text, from 0 (rare) to 255: the table memchr::memmem ranks a needle's bytes by
    (memchr 2.8, arch/all/packedpair/default_rank.rs; MIT or Unlicense), which pair8.rs takes. *)
+(* The positions the pair and two-byte searches take are below this, as their kernels take them packed in 16 bits
+   (Kernels.pair_find, Kernels.eq2_find). *)
+let max_packed = 1 lsl 16
+
 let byte_rank =
   [|
     55; 52; 51; 50; 49; 48; 47; 46; 45; 103; 242; 66; 67; 229; 44; 43; 42; 41; 40; 39; 38; 37; 36; 35; 34; 33; 56; 32;
@@ -303,8 +307,8 @@ let build_pair (literals : string array) (ranks : int array) =
     List.iter
       (fun apart ->
         if !bi < 0 then
-          for x = 0 to shortest - 1 do
-            for y = x + 1 to shortest - 1 do
+          for x = 0 to min shortest max_packed - 1 do
+            for y = x + 1 to min shortest max_packed - 1 do
               match (tests.(x), tests.(y)) with
               | Some tx, Some ty when (not apart) || disjoint values.(x) values.(y) ->
                   let cost = ((rank.(x) + rank.(y)) lsl 8) lor (Array.length tx + Array.length ty) in
@@ -437,8 +441,8 @@ let build (literals : string array) (rank : int array) =
            in the same pass; a rarer one is searched for alone. A literal of three bytes or fewer is a word as common
            as its capital (nearly every T of English text begins The), so a second byte turns few starts away. *)
         let k2 = ref (-1) in
-        if !Kernels.has_wide && unit_share (byte l best) >= pair_share && String.length l > 3 then
-          for k = 0 to String.length l - 1 do
+        if !Kernels.has_wide && unit_share (byte l best) >= pair_share && String.length l > 3 && best < max_packed then
+          for k = 0 to min (String.length l) max_packed - 1 do
             if byte l k <> byte l best && (!k2 < 0 || rank.(byte l k) < rank.(byte l !k2)) then k2 := k
           done;
         Rare { lit = l; k = best; k2 = !k2 }
@@ -456,11 +460,11 @@ let build (literals : string array) (rank : int array) =
             if !cap >= 0 then Some (Rare { lit = l; k = !cap; k2 = -1 })
             else begin
               let b = ref 0 in
-              for k = 1 to String.length l - 1 do
+              for k = 1 to min (String.length l) max_packed - 1 do
                 if rank.(byte l k) < rank.(byte l !b) then b := k
               done;
               let k2 = ref (-1) in
-              for k = 0 to String.length l - 1 do
+              for k = 0 to min (String.length l) max_packed - 1 do
                 if byte l k <> byte l !b && (!k2 < 0 || rank.(byte l k) < rank.(byte l !k2)) then k2 := k
               done;
               if !k2 >= 0 then Some (Rare { lit = l; k = !b; k2 = !k2 }) else None

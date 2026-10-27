@@ -1,5 +1,7 @@
 (* The search kernels, in C (cre_stubs.c): each is an external that allocates nothing, with untagged ints, so a call is
-   a plain C call. Every position is an offset into the string, and each reads only below n, which the caller has
+   a plain C call. None takes more than five arguments, which every ABI passes in registers: opam-repository's CI showed
+   a sixth, passed on the stack on s390x, arriving wrong there, so where a kernel needs more its small ints are packed into
+   one by a wrapper here. Every position is an offset into the string, and each reads only below n, which the caller has
    checked lies within the string. *)
 
 (* The first position in [from, n) whose byte is b, or -1. *)
@@ -27,10 +29,12 @@ external index_ranges : string -> (int[@untagged]) -> (int[@untagged]) -> string
 [@@noalloc]
 
 (* The first position in [from, n) of a run of len bytes each in one of nr ranges, or -1. *)
-external index_run :
-  string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged])
+external index_run_c :
+  string -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged])
   = "cre_index_run_byte" "cre_index_run"
 [@@noalloc]
+
+let[@inline] index_run s from n ranges nr len = index_run_c s from n ranges (nr lor (len lsl 8))
 
 (* The first position in [from, n) whose byte is not an ASCII member of a set given as its nibble bitmap
    (Charset.t.nibbles), or n: the end of a run of the set's ASCII members, a byte beyond ASCII ending it too. *)
@@ -52,31 +56,24 @@ external last_of : string -> (int[@untagged]) -> (int[@untagged]) -> string -> (
 
 (* The first start in [at, last] whose byte at i passes one of ni tests and at j one of nj, each a mask and a value,
    the bytes before n; or -1. *)
-external pair_find :
-  string ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  string ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) = "cre_pair_find_byte" "cre_pair_find"
+external pair_find_c :
+  string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged])
+  = "cre_pair_find_byte" "cre_pair_find"
 [@@noalloc]
 
+(* The positions (each below 65,536), the numbers of tests and the shortest literal's length (n - last) packed into one
+   int, so that the call passes five arguments. *)
+let[@inline] pair_find s at last n i j tests ni nj =
+  pair_find_c s at n (i lor (j lsl 16) lor (ni lsl 32) lor (nj lsl 36) lor ((n - last) lsl 40)) tests
+
 (* The first start in [at, last] whose byte at i is a and at j is b, the bytes before n; or -1. *)
-external eq2_find :
-  string ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) ->
-  (int[@untagged]) = "cre_eq2_find_byte" "cre_eq2_find"
+external eq2_find_c :
+  string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged])
+  = "cre_eq2_find_byte" "cre_eq2_find"
 [@@noalloc]
+
+(* The positions (each below 65,536) and the two bytes packed into one int, so that the call passes five arguments. *)
+let[@inline] eq2_find s at last n i j a b = eq2_find_c s at last n (i lor (j lsl 16) lor (a lsl 32) lor (b lsl 40))
 
 (* The first start in [at, last] that passes Teddy's nibble tables (96 bytes), the bytes before n; or -1. *)
 external teddy_find :
@@ -92,10 +89,13 @@ external index_unit16 :
 
 (* The first unit at or after from and before n of UTF-16LE text from the byte base that is in one of nr ranges (1 to 8),
    given as 16-bit little-endian pairs of a least unit and a width, or -1. *)
-external index_units16 :
-  string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged]) -> (int[@untagged])
+external index_units16_c :
+  string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> string -> (int[@untagged])
   = "cre_index_units16_byte" "cre_index_units16"
 [@@noalloc]
+
+(* The number of ranges is the length of the string of ranges over four, so that the call passes five arguments. *)
+let[@inline] index_units16 s base from n ranges (_ : int) = index_units16_c s base from n ranges
 
 (* Writes the low byte of count units of UTF-16LE text from unit from (from the byte base) into dst. *)
 external pack_low : string -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> Bytes.t -> (int[@untagged])
