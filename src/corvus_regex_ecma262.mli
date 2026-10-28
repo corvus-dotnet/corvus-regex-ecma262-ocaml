@@ -7,6 +7,11 @@
     the library carries, {!unicode_version}), and the [v] flag's set notation, strings in a class and properties of
     strings.
 
+    A pattern can be read with the grammar of ECMAScript 2020 ({!Es2020}), the grammar JSON Schema 2020-12 names, and
+    with the tables of Unicode 13, 17 or 18 ({!type-unicode_version}), each chosen on its own with {!compile}'s
+    [?edition] and [?unicode_version]. Both are read when the pattern is compiled, so a match costs the same whichever
+    is chosen.
+
     {1 Text}
 
     A text is UTF-8 in a [string], or UTF-16 in a [string] of UTF-16LE code units (two bytes each, as
@@ -38,8 +43,34 @@
 (** The version of the library. *)
 val version : string
 
-(** The version of Unicode the property tables are from. *)
+(** The version of Unicode a pattern is read with when none is chosen: the version of the V8 the answers are held to,
+    ["17.0.0"] today. *)
 val unicode_version : string
+
+(** The edition of ECMA-262 whose grammar a pattern is read with. *)
+type edition =
+  | Current  (** Today's grammar, ECMAScript 2025: the default. *)
+  | Es2020
+      (** The grammar of ECMAScript 2020 (ECMA-262, 11th edition), which JSON Schema 2020-12 names. It refuses what
+          later editions added, and nothing else: the [d] and [v] flags, modifier groups such as [(?i:...)], a group
+          name used by two groups, and a property name or value that is not in the edition's tables. A pattern it
+          accepts has the same answers as in today's grammar, under the same version of Unicode. *)
+
+(** The version of Unicode whose character database a pattern is read with: the members of each [\p{...}], the
+    characters of a group name, and the case folding of the [i] flag. It is independent of the {!edition}. *)
+type unicode_version =
+  | Default  (** The version of the V8 the answers are held to, Unicode 17 today. It moves when that V8 moves. *)
+  | V13  (** Unicode 13.0, the version of the year of ECMAScript 2020. *)
+  | V17  (** Unicode 17.0. *)
+  | V18  (** Unicode 18.0. *)
+  | Latest  (** The latest version the library carries, Unicode 18 today. It moves when a later version is added. *)
+
+(** The major numbers of the versions of Unicode the library carries, of the one {!Default} stands for and of the one
+    {!Latest} stands for. *)
+val unicode_versions : int list
+
+val default_unicode_version : int
+val latest_unicode_version : int
 
 (** The flags of a pattern, as [new RegExp(pattern, flags)] takes them. *)
 type flags = {
@@ -98,18 +129,26 @@ val max_stack : int
 (** A compiled pattern. It is immutable, and safe to share between threads and domains. *)
 type t
 
-(** [compile ?flags ?match_timeout pattern] compiles a pattern as [new RegExp(pattern, flags)] compiles it. [flags] is
-    a string of the flag letters, such as [""] (the default), ["u"] or ["gimsuy"]. [match_timeout] is the time in
-    seconds each match may take before it is abandoned with {!Match_timeout}, which brings a cap on the memory of its
-    backtracking with it; [0.] is no limit, and without it the pattern takes {!default_match_timeout}. The clock is read
-    every 4,096 steps of the matcher, so a match can go past the timeout by some tens of microseconds. *)
-val compile : ?flags:string -> ?match_timeout:float -> string -> (t, error) result
+(** [compile ?flags ?match_timeout ?edition ?unicode_version pattern] compiles a pattern as
+    [new RegExp(pattern, flags)] compiles it. [flags] is a string of the flag letters, such as [""] (the default),
+    ["u"] or ["gimsuy"]. [match_timeout] is the time in seconds each match may take before it is abandoned with
+    {!Match_timeout}, which brings a cap on the memory of its backtracking with it; [0.] is no limit, and without it the
+    pattern takes {!default_match_timeout}. The clock is read every 4,096 steps of the matcher, so a match can go past
+    the timeout by some tens of microseconds. [edition] ({!Current} by default) and [unicode_version] ({!Default} by
+    default) are the grammar and the tables the pattern is read with; under {!Es2020} the [d] and [v] flags are a
+    {!Flags} error. It returns the error and raises nothing, so a validator can compile a pattern from outside with a
+    match timeout of its own and no default. *)
+val compile :
+  ?flags:string -> ?match_timeout:float -> ?edition:edition -> ?unicode_version:unicode_version -> string ->
+  (t, error) result
 
 (** {!compile}, raising {!Compile_error}. *)
-val compile_exn : ?flags:string -> ?match_timeout:float -> string -> t
+val compile_exn :
+  ?flags:string -> ?match_timeout:float -> ?edition:edition -> ?unicode_version:unicode_version -> string -> t
 
-(** Whether the pattern is valid with the flags, without compiling it. *)
-val is_valid : ?flags:string -> string -> bool
+(** Whether the pattern is valid with the flags, in the grammar of an edition and under a version of Unicode, without
+    compiling it. *)
+val is_valid : ?flags:string -> ?edition:edition -> ?unicode_version:unicode_version -> string -> bool
 
 (** Reads flags as [new RegExp] reads them. *)
 val parse_flags : string -> (flags, error) result
@@ -135,6 +174,13 @@ val flags_string : t -> string
 
 (** The pattern's match timeout in seconds, or [None]. *)
 val match_timeout : t -> float option
+
+(** The edition of ECMA-262 whose grammar the pattern was read with. *)
+val edition : t -> edition
+
+(** The version of Unicode whose tables the pattern was read with, resolved: {!V13}, {!V17} or {!V18}, never
+    {!Default} or {!Latest}. *)
+val unicode_version_of : t -> unicode_version
 
 (** The number of capturing groups. *)
 val group_count : t -> int

@@ -8,8 +8,8 @@
    The parser applies the equivalence to every literal and class as it reads them, so a case-insensitive pattern is
    matched with plain classes. Only a backreference needs the function when matching.
 
-   The folding and the uppercase mapping come from the tables of Ucd, never from the standard library, so a pattern
-   matches the same texts whatever built the program. *)
+   The folding and the uppercase mapping come from the tables of the pattern's version of Unicode in Ucd, never from
+   the standard library, so a pattern matches the same texts whatever built the program. *)
 
 (* The characters of the Basic Multilingual Plane whose uppercase form is more than one character, as inclusive pairs.
    Canonicalize leaves them alone. *)
@@ -22,17 +22,17 @@ let multi_upper =
       0x1FF2; 0x1FF4; 0x1FF6; 0x1FF7; 0x1FFC; 0x1FFC; 0xFB00; 0xFB06; 0xFB13; 0xFB17;
     |]
 
-(* The Canonicalize function of ECMA-262 for case-insensitive matching. *)
-let canonicalize r unicode_mode =
+(* The Canonicalize function of ECMA-262 for case-insensitive matching, with the case mappings of a version. *)
+let canonicalize u r unicode_mode =
   if unicode_mode then
     (* Every character of a simple case folding class folds to the same character. *)
-    Ucd.fold r
+    Ucd.fold u r
   else if
     (* A character beyond the Basic Multilingual Plane is two code units, and neither has an uppercase form. *)
     r > 0xFFFF || Charset.contains multi_upper r
   then r
   else begin
-    let upper = Ucd.to_upper r in
+    let upper = Ucd.to_upper u r in
     if (r >= 128 && upper < 128) || upper > 0xFFFF then r else upper
   end
 
@@ -60,30 +60,40 @@ let make_table (classes : (int, int list) Hashtbl.t) =
   let classes = Array.of_list (List.rev !all) in
   { points; class_of = Array.map (fun p -> Hashtbl.find by_member p) points; classes }
 
+(* The tables of a version of Unicode, each built on first use and kept with the version. *)
 let unicode_fold_table =
-  Once.make (fun () ->
-      (* A class is a character that others fold to, with those others. *)
-      let classes = Hashtbl.create 4096 in
-      Array.iter
-        (fun r ->
-          let key = Ucd.fold r in
-          let members = match Hashtbl.find_opt classes key with Some l -> l | None -> [ key ] in
-          Hashtbl.replace classes key (r :: members))
-        (Ucd.folding ());
-      make_table classes)
+  Ucd.per_version (fun u ->
+      Once.make (fun () ->
+          (* A class is a character that others fold to, with those others. *)
+          let classes = Hashtbl.create 4096 in
+          Array.iter
+            (fun r ->
+              let key = Ucd.fold u r in
+              let members = match Hashtbl.find_opt classes key with Some l -> l | None -> [ key ] in
+              Hashtbl.replace classes key (r :: members))
+            (Ucd.folding u);
+          make_table classes))
 
 let legacy_fold_table =
-  Once.make (fun () ->
-      let classes = Hashtbl.create 4096 in
-      for r = 0 to 0xFFFF do
-        let key = canonicalize r false in
-        let members = match Hashtbl.find_opt classes key with Some l -> l | None -> [] in
-        Hashtbl.replace classes key (r :: members)
-      done;
-      make_table classes)
+  Ucd.per_version (fun u ->
+      Once.make (fun () ->
+          let classes = Hashtbl.create 4096 in
+          for r = 0 to 0xFFFF do
+            let key = canonicalize u r false in
+            let members = match Hashtbl.find_opt classes key with Some l -> l | None -> [] in
+            Hashtbl.replace classes key (r :: members)
+          done;
+          make_table classes))
 
-(* The table of the grammar in use. It is built on first use, which only a case-insensitive pattern reaches. *)
-let fold_classes unicode_mode = Once.get (if unicode_mode then unicode_fold_table else legacy_fold_table)
+(* The table of the grammar in use for a version of Unicode. It is built on first use, which only a case-insensitive
+   pattern reaches. *)
+let fold_classes u unicode_mode = Once.get ((if unicode_mode then unicode_fold_table else legacy_fold_table) u)
+
+(* Whether two characters are equal ignoring case, with the case mappings of the version of Unicode whose major number
+   a backreference carries (prog.ml): the test of a case-insensitive backreference. *)
+let equal_ignoring_case major a b unicode_mode =
+  let u = Ucd.by_major major in
+  canonicalize u a unicode_mode = canonicalize u b unicode_mode
 
 (* The first index of a sorted array whose element is at least x. *)
 let lower_bound (a : int array) x =
@@ -94,10 +104,10 @@ let lower_bound (a : int array) x =
   done;
   !lo
 
-(* The set of every character equivalent to some member of the set, and the number of characters with a case variant
-   that the set holds, which is the work it did. *)
-let fold_closure (set : Charset.t) unicode_mode =
-  let table = fold_classes unicode_mode in
+(* The set of every character equivalent to some member of the set under a version of Unicode, and the number of
+   characters with a case variant that the set holds, which is the work it did. *)
+let fold_closure u (set : Charset.t) unicode_mode =
+  let table = fold_classes u unicode_mode in
   let extra = Buffer_int.create 16 and variants = ref 0 in
   let r = set.ranges in
   for i = 0 to (Array.length r / 2) - 1 do

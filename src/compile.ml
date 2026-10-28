@@ -68,7 +68,8 @@ type inst = {
   (* x and y are jump targets. *)
   mutable x : int;
   mutable y : int;
-  (* a and b are a group, a loop or a range of groups, depending on the instruction. *)
+  (* a and b are a group, a loop or a range of groups, depending on the instruction. For a backreference b is the major
+     number of the version of Unicode whose case folding it matches with. *)
   mutable a : int;
   mutable b : int;
   (* min and max bound a repetition. A max of -1 is no bound. *)
@@ -521,7 +522,9 @@ let rec emit c n back =
       in
       (* When several groups share the name, at most one has taken part, and the others match the empty string. So
          matching each in turn matches the one that took part. *)
-      Array.iter (fun g -> ignore (add c { (inst op) with a = Hashtbl.find c.tracked g; flag = c.cunicode })) n.groups
+      Array.iter
+        (fun g -> ignore (add c { (inst op) with a = Hashtbl.find c.tracked g; b = n.fold_version; flag = c.cunicode }))
+        n.groups
   | Look ->
       let look = add c { (inst Look_) with flag = n.negative } in
       (* Whether the body matches depends on nothing outside it. *)

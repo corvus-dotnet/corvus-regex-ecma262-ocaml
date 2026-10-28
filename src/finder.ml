@@ -69,12 +69,15 @@ let unit_shares =
 (* An ASCII unit's share of English text in parts per ten thousand. *)
 let unit_share b = unit_shares.(b land 0x7F)
 
+(* The letters of the default version of Unicode: a share only guides the choice of a unit, and these alphabets are the
+   same in every version. *)
 let lu =
-  Once.make (fun () -> match Ucd.category "Lu" with Some r -> Charset.make (Ucd.pairs r) | None -> Charset.make [||])
+  Once.make (fun () ->
+      match Ucd.category Ucd.v17 "Lu" with Some r -> Charset.make (Ucd.pairs r) | None -> Charset.make [||])
 
 let lower_letters =
   Once.make (fun () ->
-      let pairs n = Option.map Ucd.pairs (Ucd.category n) in
+      let pairs n = Option.map Ucd.pairs (Ucd.category Ucd.v17 n) in
       Charset.make (Array.concat (List.filter_map pairs [ "Ll"; "Lt"; "Lm"; "Lo" ])))
 
 (* A UTF-16 code unit's share of text, for the choice of the unit a search over UTF-16 looks for: an ASCII unit as

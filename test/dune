@@ -14,3 +14,9 @@
  (name test_alloc)
  (modules test_alloc)
  (libraries corvus-regex-ecma262))
+
+(test
+ (name test_domains)
+ (modules test_domains)
+ (enabled_if (>= %{ocaml_version} 5.0))
+ (libraries corvus-regex-ecma262))

@@ -303,7 +303,7 @@ let run_on (prog : program) (st : Vm_state.t) (t : Units.text) start =
                   let want = rune_of pw and got = rune_of pg in
                   good :=
                     got = want
-                    || (i.op = Backref_fold && Fold.canonicalize got i.flag = Fold.canonicalize want i.flag)
+                    || (i.op = Backref_fold && Fold.equal_ignoring_case i.b got want i.flag)
                 end
               done;
               if !good then begin
@@ -333,7 +333,7 @@ let run_on (prog : program) (st : Vm_state.t) (t : Units.text) start =
                   let want = rune_of pw and got = rune_of pg in
                   good :=
                     got = want
-                    || (i.op = Backref_fold_back && Fold.canonicalize got i.flag = Fold.canonicalize want i.flag)
+                    || (i.op = Backref_fold_back && Fold.equal_ignoring_case i.b got want i.flag)
                 end
               done;
               if !good then begin

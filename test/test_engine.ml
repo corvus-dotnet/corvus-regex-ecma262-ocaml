@@ -202,6 +202,87 @@ let test_shared_memory () =
   | None -> check false "then a simple shape");
   check (R.find many "abcde" <> None && R.find simple "7" <> None) "and the two again"
 
+(* UTF-16LE text from UTF-8 text. *)
+let utf16_of s =
+  let b = Buffer.create (2 * String.length s) in
+  let rec go i =
+    if i < String.length s then begin
+      let d = String.get_utf_8_uchar s i in
+      Buffer.add_utf_16le_uchar b (Uchar.utf_decode_uchar d);
+      go (i + Uchar.utf_decode_length d)
+    end
+  in
+  go 0;
+  Buffer.contents b
+
+let test_editions () =
+  let vithkuqi_capital = "\xF0\x90\x95\xB0" and vithkuqi_small = "\xF0\x90\x96\x97" in
+  let old_polish_capital = "\xEA\x9F\x80" and old_polish_small = "\xEA\x9F\x81" in
+  let under ?(flags = "") v p = R.compile_exn ~flags ~unicode_version:v p in
+  let valid ?(edition = R.Current) flags v p = R.is_valid ~flags ~edition ~unicode_version:v p in
+  let re = compile "a" in
+  check (R.edition re = R.Current && R.unicode_version_of re = R.V17) "the defaults are today's grammar and V8's Unicode";
+  List.iter
+    (fun (v, resolved) -> check (R.unicode_version_of (under v "a") = resolved) "a version is resolved when compiled")
+    [ (R.Default, R.V17); (R.V13, R.V13); (R.V17, R.V17); (R.V18, R.V18); (R.Latest, R.V18) ];
+  check (not (valid "u" R.V13 "\\p{Script=Vithkuqi}")) "no Vithkuqi in Unicode 13";
+  check (valid "u" R.Default "\\p{Script=Vithkuqi}") "Vithkuqi in Unicode 17";
+  check (valid "u" R.V13 "\\p{Script=Yezidi}") "Yezidi in Unicode 13";
+  check (not (valid "u" R.Default "\\p{Script=Jurchen}")) "no Jurchen in Unicode 17";
+  check (valid "u" R.V18 "\\p{scx=Jurc}") "Jurchen in Unicode 18";
+  check (valid "u" R.Latest "\\p{Script=Jurchen}") "Jurchen in the latest";
+  (* The same expression under two versions, in both orders: the property sets are each version's. *)
+  for _ = 1 to 2 do
+    check (R.is_match (under ~flags:"u" R.V17 "^\\p{Ll}$") vithkuqi_small) "\\p{Ll} under 17";
+    check (not (R.is_match (under ~flags:"u" R.V13 "^\\p{Ll}$") vithkuqi_small)) "\\p{Ll} under 13"
+  done;
+  check (R.is_match (under ~flags:"iu" R.V17 "\\u{10570}") vithkuqi_small) "a literal folds as 17 folds";
+  check (not (R.is_match (under ~flags:"iu" R.V13 "\\u{10570}") vithkuqi_small)) "a literal folds as 13 folds";
+  check (R.is_match (under ~flags:"i" R.V17 old_polish_capital) old_polish_small) "Old Polish O folds in 17 without u";
+  check (not (R.is_match (under ~flags:"i" R.V13 old_polish_capital) old_polish_small)) "Old Polish O does not fold in 13";
+  List.iter
+    (fun (flags, first, second) ->
+      let text = first ^ second and twice = first ^ first in
+      List.iter
+        (fun p ->
+          check (R.is_match (under ~flags R.V17 p) text) (p ^ " folds under 17");
+          check (R.is_match_utf16 (under ~flags R.V18 p) (utf16_of text)) (p ^ " folds over UTF-16 under 18");
+          let re = under ~flags R.V13 p in
+          check (not (R.is_match re text)) (p ^ " does not fold under 13");
+          check (not (R.is_match_utf16 re (utf16_of text))) (p ^ " does not fold over UTF-16 under 13");
+          check (R.is_match re twice) (p ^ " matches the same letter twice under 13");
+          (* The program that records every group folds as the one that finds the match. *)
+          check (R.find re twice <> None) (p ^ " captures under 13");
+          check (R.find re text = None) (p ^ " captures nothing under 13"))
+        [ "(.)\\1"; "(?<=\\1(.))"; "(?:x|(.))+\\1$" ])
+    [ ("iu", vithkuqi_capital, vithkuqi_small); ("i", old_polish_capital, old_polish_small) ];
+  List.iter
+    (fun (p, flags) ->
+      check
+        (match R.compile ~flags ~edition:R.Es2020 ~unicode_version:R.Latest p with Error (R.Invalid _) -> true | _ -> false)
+        (p ^ " is refused in 2020");
+      check (match R.compile ~flags ~unicode_version:R.Latest p with Ok _ -> true | Error _ -> false) (p ^ " is accepted today"))
+    [ ("(?i:a)", ""); ("(?-i:a)", "i"); ("(?s:.)", "u"); ("(?<a>x)|(?<a>y)", ""); ("(?<a>x)|(?<a>y)", "u");
+      ("\\p{Script=Yezidi}", "u"); ("\\p{sc=Vith}", "u"); ("\\p{Script_Extensions=Toto}", "u") ];
+  List.iter
+    (fun (p, flags) ->
+      check (match R.compile ~flags ~edition:R.Es2020 ~unicode_version:R.V13 p with Ok _ -> true | Error _ -> false)
+        (p ^ " is accepted in 2020"))
+    [ ("\\p{Script=Greek}", "u"); ("\\p{L}\\p{gc=Lu}\\p{Lowercase}", "u"); ("\\P{scx=Latn}", "iu");
+      ("\\p{Script=Yezidi}", ""); ("(?<a>x)(?<b>y)\\k<a>", "u"); ("(?<=a)(?<!b)", "s"); ("(?:i)", "") ];
+  check (match R.compile ~flags:"d" ~edition:R.Es2020 "a" with Error (R.Flags _) -> true | _ -> false) "no d flag in 2020";
+  check (match R.compile ~flags:"v" ~edition:R.Es2020 "a" with Error (R.Flags _) -> true | _ -> false) "no v flag in 2020";
+  check (not (R.is_valid ~flags:"v" ~edition:R.Es2020 "a")) "is_valid: no v flag in 2020";
+  check (match R.compile ~flags:"v" "a" with Ok _ -> true | Error _ -> false) "the v flag today";
+  check (R.edition (R.compile_exn ~edition:R.Es2020 "a") = R.Es2020) "the edition is kept";
+  (* compile takes a match timeout of its own and raises nothing for the pattern. *)
+  check
+    (match R.compile ~flags:"u" ~match_timeout:0.25 "a+" with
+    | Ok re -> R.match_timeout re = Some 0.25
+    | Error _ -> false)
+    "compile with a timeout of its own";
+  check (match R.compile ~flags:"u" "(" with Error (R.Invalid m) -> m <> "" | _ -> false) "an invalid pattern gives its error"
+
 let () =
   test_flags ();
   test_compile_errors ();
@@ -218,5 +299,6 @@ let () =
   test_linear ();
   test_captures ();
   test_shared_memory ();
+  test_editions ();
   Printf.printf "%d checks, %d failed\n" !checks !failures;
   if !failures > 0 then exit 1
