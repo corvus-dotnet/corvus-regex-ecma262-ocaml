@@ -1,6 +1,6 @@
 (* The first use of a version of Unicode from many domains at once. Each version's tables, folds and property sets
    are made when first asked for; this asks for those of Unicode 13 and 18 from eight domains together, before
-   anything else has, and checks that every domain gets the same answers as one alone. OCaml 5 only. *)
+   anything else has, and checks that every domain gets the same answers as one alone. OCaml 5 only (test/dune). *)
 
 module R = Corvus_regex_ecma262
 

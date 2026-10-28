@@ -18,5 +18,20 @@
 (test
  (name test_domains)
  (modules test_domains)
- (enabled_if (>= %{ocaml_version} 5.0))
  (libraries corvus-regex-ecma262))
+
+; The first use of a version from many domains, which only OCaml 5 has.
+
+(rule
+ (targets test_domains.ml)
+ (enabled_if
+  (>= %{ocaml_version} 5.0))
+ (action
+  (copy test_domains.ocaml5.ml test_domains.ml)))
+
+(rule
+ (targets test_domains.ml)
+ (enabled_if
+  (< %{ocaml_version} 5.0))
+ (action
+  (copy test_domains.ocaml4.ml test_domains.ml)))
