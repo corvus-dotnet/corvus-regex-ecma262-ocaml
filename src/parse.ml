@@ -83,6 +83,8 @@ type node = {
   name : int array;
   (* Marks a Backref, Word_boundary or Not_word_boundary inside a case-insensitive group. *)
   fold : bool;
+  (* The major number of the version of Unicode whose case folding a Backref matches with. *)
+  fold_version : int;
   (* behind and negative describe a Look. *)
   behind : bool;
   negative : bool;
@@ -101,6 +103,7 @@ let node kind =
     groups = [||];
     name = [||];
     fold = false;
+    fold_version = 0;
     behind = false;
     negative = false;
   }
@@ -128,9 +131,22 @@ type syntax = {
   icase : bool;
   multiline : bool;
   dot_all : bool;
+  (* The grammar of ECMAScript 2020, which refuses what later editions added. *)
+  es2020 : bool;
+  (* The major number of the version of Unicode whose tables the pattern is read with: 13, 17 or 18. *)
+  unicode_version : int;
 }
 
-let default_syntax = { unicode = false; sets = false; icase = false; multiline = false; dot_all = false }
+let default_syntax =
+  {
+    unicode = false;
+    sets = false;
+    icase = false;
+    multiline = false;
+    dot_all = false;
+    es2020 = false;
+    unicode_version = 17;
+  }
 
 (* Reads a pattern by recursive descent. With unicode set it applies the grammar of the u flag. Without it, it applies
    the Annex B grammar of patterns with no flag. *)
@@ -143,6 +159,10 @@ type parser = {
   sets : bool;
   (* The sequences of the property of strings the last class escape named (the v flag), or None. *)
   mutable escape_strings : int array list option;
+  (* The Unicode of the version the pattern is read with. *)
+  ucd : Ucd.t;
+  (* The grammar of ECMAScript 2020, which refuses what later editions added. *)
+  es2020 : bool;
   mutable depth : int;
   (* group_count and has_names come from a scan of the whole pattern before parsing, because the meaning of \1 and \k
      depends on groups that may follow them. *)
@@ -260,8 +280,11 @@ let in_ascii c chars = c >= 0 && c < 128 && String.contains chars (Char.chr c)
 (* Whether c is one of the characters the u flag lets an identity escape name. *)
 let syntax_character c = in_ascii c "^$\\.*+?()[]{}|/"
 
-let id_start = match Ucd_tables.binary_table "ID_Start" with Some t -> t | None -> failwith "no ID_Start"
-let id_continue = match Ucd_tables.binary_table "ID_Continue" with Some t -> t | None -> failwith "no ID_Continue"
+(* The tables a group name is read with, in each version of Unicode. *)
+let id_start = Ucd.per_version (fun u -> match u.binary_table "ID_Start" with Some t -> t | None -> failwith "no ID_Start")
+
+let id_continue =
+  Ucd.per_version (fun u -> match u.binary_table "ID_Continue" with Some t -> t | None -> failwith "no ID_Continue")
 
 let append_class_atom pairs c set =
   match set with
@@ -335,7 +358,7 @@ let eat ps c =
 (* The set with every character equivalent to one of its members. It charges the pattern for the work and for the set:
    a byte for each character with a case variant that the set holds, and its ranges. *)
 let fold_set ps set =
-  let closed, variants = Fold.fold_closure set ps.unicode in
+  let closed, variants = Fold.fold_closure ps.ucd set ps.unicode in
   charge ps (variants + (range_size * Array.length closed.Charset.ranges / 2));
   closed
 
@@ -347,7 +370,7 @@ let fold_if ps set = if ps.icase then fold_set ps set else set
    to it. *)
 let char_node ps c =
   if ps.icase then begin
-    let set, _ = Fold.fold_closure (Charset.make [| c; c |]) ps.unicode in
+    let set, _ = Fold.fold_closure ps.ucd (Charset.make [| c; c |]) ps.unicode in
     if Array.length set.ranges <> 2 || set.ranges.(0) <> set.ranges.(1) then set_of set else char_of c
   end
   else char_of c
@@ -504,9 +527,9 @@ let group_name ps =
       ps.i <- ps.i + 1
     end;
     if Buffer_int.length name = 0 then begin
-      if not (!c = ch '$' || !c = ch '_' || Ucd.contains id_start !c) then fail ps "invalid group name"
+      if not (!c = ch '$' || !c = ch '_' || Ucd.contains (id_start ps.ucd) !c) then fail ps "invalid group name"
     end
-    else if not (!c = ch '$' || !c = 0x200C || !c = 0x200D || Ucd.contains id_continue !c) then
+    else if not (!c = ch '$' || !c = 0x200C || !c = 0x200D || Ucd.contains (id_continue ps.ucd) !c) then
       fail ps "invalid group name";
     Buffer_int.add name !c
   done;
@@ -558,9 +581,10 @@ let class_escape ps c =
       (* A name ECMA-262 defines is ASCII. Any other character makes a name no table has. *)
       let expr = String.init (ps.i - start) (fun k -> let r = ps.p.(start + k) in if r < 128 then Char.chr r else '\x7F') in
       if not (eat ps '}') then fail ps "invalid property name";
-      match Charset.property_set expr with
+      (* The 2020 grammar knows only the names and values of its own tables, whatever the version of Unicode. *)
+      match if ps.es2020 && not (Es2020.has_property expr) then None else Charset.property_set ps.ucd expr with
       | None -> (
-          match if ps.sets && c = ch 'p' then Charset.string_property expr else None with
+          match if ps.sets && c = ch 'p' then Charset.string_property ps.ucd expr else None with
           | Some property ->
               (* A property of strings, which the v flag alone names, and which has no complement. *)
               charge ps (range_size * ((Array.length property.set.ranges / 2) + List.length property.strings));
@@ -666,7 +690,7 @@ let value_subtract a b =
 (* A string as its code points, each canonicalized in a case-insensitive group so that strings are compared as
    ECMA-262 compares them. *)
 let canonical_string ps code_points =
-  Array.map (fun c -> if ps.icase then Fold.canonicalize c true else c) code_points
+  Array.map (fun c -> if ps.icase then Fold.canonicalize ps.ucd c true else c) code_points
 
 (* The value of a property of strings: its code points, and its sequences (case folded in a case-insensitive group). *)
 let strings_value ps cset strings =
@@ -1040,7 +1064,8 @@ and group ps =
   end
   else begin
     let c = peek ps in
-    if c = ch 'i' || c = ch 'm' || c = ch 's' || c = ch '-' then (modifier_group ps, true)
+    (* Modifier groups came in ECMAScript 2025, so the 2020 grammar reads (?i as an invalid group. *)
+    if (c = ch 'i' || c = ch 'm' || c = ch 's' || c = ch '-') && not ps.es2020 then (modifier_group ps, true)
     else if eat ps '=' || eat ps '!' then begin
       let negative = ps.p.(ps.i - 1) = ch '!' in
       let body = disjunction ps in
@@ -1060,8 +1085,9 @@ and group ps =
       else begin
         let name = group_name ps in
         (* Two groups may share a name only when they are in separate alternatives of one disjunction, so that no
-           match can go through both. *)
+           match can go through both. The 2020 grammar refuses a name used twice, wherever the groups are. *)
         (match Hashtbl.find_opt ps.names name with
+        | Some _ when ps.es2020 -> fail ps "duplicate group name"
         | Some others ->
             let here = Array.of_list (List.map (fun b -> { b with alternative = b.alternative }) ps.path) in
             List.iter
@@ -1157,7 +1183,7 @@ and atom_escape ps =
       let name = group_name ps in
       ps.named_refs <- true;
       ps.needs_backtracking <- true;
-      ({ (node Backref) with name; fold = ps.icase }, true)
+      ({ (node Backref) with name; fold = ps.icase; fold_version = ps.ucd.major }, true)
     end
     else begin
       ps.i <- ps.i + 1;
@@ -1169,7 +1195,7 @@ and atom_escape ps =
     let n = number ps in
     if n <= ps.group_count then begin
       ps.needs_backtracking <- true;
-      ({ (node Backref) with groups = [| n |]; fold = ps.icase }, true)
+      ({ (node Backref) with groups = [| n |]; fold = ps.icase; fold_version = ps.ucd.major }, true)
     end
     else begin
       if ps.unicode then fail ps "reference to a group that does not exist";
@@ -1207,6 +1233,8 @@ let parse_with pattern (syntax : syntax) =
       unicode;
       sets = syntax.sets;
       escape_strings = None;
+      ucd = Ucd.by_major syntax.unicode_version;
+      es2020 = syntax.es2020;
       depth = 0;
       group_count = 0;
       has_names = false;

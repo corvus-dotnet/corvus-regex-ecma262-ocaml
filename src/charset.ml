@@ -207,44 +207,46 @@ let binary_name = function
   | "XID_Start" | "XIDS" -> Some "XID_Start"
   | _ -> None
 
-let category_pairs value =
-  match category_name value with None -> None | Some n -> Option.map Ucd.pairs (Ucd.category n)
+let category_pairs u value =
+  match category_name value with None -> None | Some n -> Option.map Ucd.pairs (Ucd.category u n)
 
-(* The ranges of a property expression. Every range comes from the tables of Ucd, which hold one fixed version of
-   Unicode, so the answer does not depend on what built the program. *)
-let property_pairs expr =
+(* The ranges of a property expression under a version of Unicode. Every range comes from the tables of Ucd of the
+   version, so the answer does not depend on what built the program. *)
+let property_pairs u expr =
   match String.index_opt expr '=' with
   | Some k -> (
       let name = String.sub expr 0 k and value = String.sub expr (k + 1) (String.length expr - k - 1) in
       match name with
-      | "General_Category" | "gc" -> category_pairs value
-      | "Script" | "sc" -> Option.map Ucd.pairs (Ucd.script value)
-      | "Script_Extensions" | "scx" -> Option.map Ucd.pairs (Ucd.script_extensions value)
+      | "General_Category" | "gc" -> category_pairs u value
+      | "Script" | "sc" -> Option.map Ucd.pairs (Ucd.script u value)
+      | "Script_Extensions" | "scx" -> Option.map Ucd.pairs (Ucd.script_extensions u value)
       | _ -> None)
   | None -> (
-      match category_pairs expr with
+      match category_pairs u expr with
       | Some p -> Some p
       | None -> (
           match binary_name expr with
           | None -> None
           | Some "ASCII" -> Some [| 0; 0x7F |]
           | Some "Any" -> Some [| 0; max_rune |]
-          | Some canonical -> Option.map Ucd.pairs (Ucd.binary canonical)))
+          | Some canonical -> Option.map Ucd.pairs (Ucd.binary u canonical)))
 
 module Smap = Map.Make (String)
 
-(* The sets already built for property expressions. A property set can have hundreds of ranges, and patterns tend to
-   repeat the same few. Only an expression ECMA-262 defines is kept, and those are a fixed few hundred, so the cache is
-   bounded. The map is immutable and replaced with a compare and set, so the cache needs no lock on OCaml 4.14 or 5. *)
-let property_cache : t Smap.t Atomic.t = Atomic.make Smap.empty
+(* The sets already built for property expressions, one cache for each version of Unicode. A property set can have
+   hundreds of ranges, and patterns tend to repeat the same few. Only an expression ECMA-262 defines is kept, and those
+   are a fixed few hundred, so each cache is bounded. The map is immutable and replaced with a compare and set, so the
+   cache needs no lock on OCaml 4.14 or 5. *)
+let property_cache : Ucd.t -> t Smap.t Atomic.t = Ucd.per_version (fun _ -> Atomic.make Smap.empty)
 
-(* Resolves the expression between the braces of \p{...} to its set. None for a name or value that ECMA-262 does not
-   define. *)
-let property_set expr =
+(* Resolves the expression between the braces of \p{...} to its set under a version of Unicode. None for a name or
+   value that ECMA-262 does not define. *)
+let property_set u expr =
+  let property_cache = property_cache u in
   match Smap.find_opt expr (Atomic.get property_cache) with
   | Some s -> Some s
   | None -> (
-      match property_pairs expr with
+      match property_pairs u expr with
       | None -> None
       | Some pairs ->
           let set = make pairs in
@@ -285,7 +287,10 @@ type string_property = { set : t; strings : int array list }
 
 let hex s = int_of_string ("0x" ^ s)
 
+(* The properties of strings of a version of Unicode, read from its strings on first use and kept with it, the union of
+   them all last. *)
 let string_properties =
+  Ucd.per_version (fun (u : Ucd.t) ->
   Once.make (fun () ->
       let all = ref [] and union_pairs = ref [] and every = ref [] in
       Array.iter
@@ -313,16 +318,17 @@ let string_properties =
           union_pairs := p :: !union_pairs;
           every := !every @ strings;
           all := { set = make p; strings } :: !all)
-        Strings_tables.properties;
+        u.strings;
       let rgi = { set = make (Array.concat (List.rev !union_pairs)); strings = !every } in
-      Array.of_list (List.rev (rgi :: !all)))
+      Array.of_list (List.rev (rgi :: !all))))
 
-(* The property of strings of the name (RGI_Emoji and the six it is the union of), or None. *)
-let string_property name =
-  let props = Once.get string_properties in
+(* The property of strings of the name (RGI_Emoji and the six it is the union of) under a version of Unicode, or
+   None. *)
+let string_property (u : Ucd.t) name =
+  let props = Once.get (string_properties u) in
   if name = "RGI_Emoji" then Some props.(Array.length props - 1)
   else begin
     let found = ref None in
-    Array.iteri (fun k (n, _, _) -> if n = name then found := Some props.(k)) Strings_tables.properties;
+    Array.iteri (fun k (n, _, _) -> if n = name then found := Some props.(k)) u.strings;
     !found
   end

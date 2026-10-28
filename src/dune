@@ -7,7 +7,9 @@
  (foreign_stubs
   (language c)
   (names cre_stubs)
-  (flags (:standard -O2)))
+  ; Each kernel starts on a line of 64 bytes, so a change to the OCaml code linked before them cannot move their loops
+  ; across a line and change the time of a search (a 16% swing on a literal search, measured on 0.1.1).
+  (flags (:standard -O2 -falign-functions=64)))
  (ocamlopt_flags (:standard -O3 -inline 200))
  (flags (:standard -w +a-4-9-40-41-42-44-45-70)))
 

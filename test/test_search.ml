@@ -44,6 +44,8 @@ let syntax_of_flags flags =
     icase = has 'i';
     multiline = has 'm';
     dot_all = has 's';
+    es2020 = false;
+    unicode_version = 17;
   }
 
 (* A pattern's programs, as the library compiles them: the one that records only the groups backreferences name, and

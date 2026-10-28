@@ -2,7 +2,17 @@
    interface for what each member does. *)
 
 let version = "0.0.0"
-let unicode_version = Ucd_tables.version
+let unicode_version = Ucd.v17.version
+
+type edition = Current | Es2020
+type unicode_version = Default | V13 | V17 | V18 | Latest
+
+(* The major number of the version of Unicode a unicode_version stands for: 13, 17 or 18. *)
+let major_of = function V13 -> 13 | V18 | Latest -> 18 | Default | V17 -> 17
+let version_of_major = function 13 -> V13 | 18 -> V18 | _ -> V17
+let unicode_versions = [ 13; 17; 18 ]
+let default_unicode_version = 17
+let latest_unicode_version = 18
 
 type flags = {
   has_indices : bool;
@@ -93,14 +103,23 @@ let flags_to_string f =
          (f.sticky, "y");
        ])
 
-let syntax f : Parse.syntax =
+let syntax ?(edition = Current) ?(major = 17) f : Parse.syntax =
   {
     unicode = f.unicode || f.unicode_sets;
     sets = f.unicode_sets;
     icase = f.ignore_case;
     multiline = f.multiline;
     dot_all = f.dot_all;
+    es2020 = edition = Es2020;
+    unicode_version = major;
   }
+
+(* The grammar of ECMAScript 2020 has no d flag (2022) and no v flag (2024), and refuses them as flags that are not
+   valid. *)
+let check_edition edition f =
+  if edition = Es2020 && (f.has_indices || f.unicode_sets) then
+    Error (Flags (Printf.sprintf "the flags %S have d or v, which ECMAScript 2020 does not have" (flags_to_string f)))
+  else Ok f
 
 (* The match timeout every pattern compiled without one of its own takes, in nanoseconds; 0 for none. *)
 let default_timeout = Atomic.make 0
@@ -127,6 +146,9 @@ type t = {
   names : group_name list;
   (* The time a match may take in nanoseconds, or 0 for no limit. *)
   timeout : int;
+  (* The edition of the grammar and the major number of the version of Unicode the pattern was read with. *)
+  edition : edition;
+  major : int;
   (* The working memory a match takes when the caller gives none: one match at a time holds it, and a match that finds
      it held makes its own. *)
   state : Vm_state.t option Atomic.t;
@@ -157,11 +179,11 @@ let too_large limit value =
 
 let invalid pattern msg pos = Invalid (Printf.sprintf "ecmaregex: %s at offset %d in %S" msg pos pattern)
 
-let compile_with_ns pattern flags timeout =
+let compile_with_ns ?(edition = Current) ?(major = 17) pattern flags timeout =
   let k = Units.first_invalid_utf8 pattern in
   if k >= 0 then Error (Invalid_utf8 k)
   else
-    match Parse.parse_with pattern (syntax flags) with
+    match Parse.parse_with pattern (syntax ~edition ~major flags) with
     | exception Parse.Syntax (msg, pos) -> Error (invalid pattern msg pos)
     | exception Parse.Too_large (limit, value) -> Error (too_large limit value)
     | root, ps ->
@@ -177,7 +199,9 @@ let compile_with_ns pattern flags timeout =
             (* Built from the pattern read again, so that a pattern does not keep its tree. *)
             Some
               (Once.make (fun () ->
-                   match Parse.parse_with pattern (syntax flags) with root, _ -> Dfa.build root | exception _ -> None))
+                   match Parse.parse_with pattern (syntax ~edition ~major flags) with
+                   | root, _ -> Dfa.build root
+                   | exception _ -> None))
           else None
         in
         let home = Some (Vm_state.create ()) in
@@ -191,33 +215,42 @@ let compile_with_ns pattern flags timeout =
             group_count = Parse.group_count ps;
             names;
             timeout;
+            edition;
+            major;
             state = Atomic.make home;
             home;
             last8 = Atomic.make no_text;
             last16 = Atomic.make no_text;
           }
 
-let compile ?(flags = "") ?match_timeout pattern =
-  match parse_flags flags with
+let compile ?(flags = "") ?match_timeout ?(edition = Current) ?(unicode_version = Default) pattern =
+  match Result.bind (parse_flags flags) (check_edition edition) with
   | Error e -> Error e
   | Ok f ->
       let ns = match match_timeout with None -> Atomic.get default_timeout | Some s -> ns_of_seconds s in
-      compile_with_ns pattern f ns
+      compile_with_ns ~edition ~major:(major_of unicode_version) pattern f ns
 
-let compile_exn ?flags ?match_timeout pattern =
-  match compile ?flags ?match_timeout pattern with Ok re -> re | Error e -> raise (Compile_error e)
+let compile_exn ?flags ?match_timeout ?edition ?unicode_version pattern =
+  match compile ?flags ?match_timeout ?edition ?unicode_version pattern with
+  | Ok re -> re
+  | Error e -> raise (Compile_error e)
 
-let is_valid ?(flags = "") pattern =
-  match parse_flags flags with
+let is_valid ?(flags = "") ?(edition = Current) ?(unicode_version = Default) pattern =
+  match Result.bind (parse_flags flags) (check_edition edition) with
   | Error _ -> false
   | Ok f -> (
       Units.first_invalid_utf8 pattern < 0
-      && match Parse.parse_with pattern (syntax f) with exception _ -> false | _ -> true)
+      &&
+      match Parse.parse_with pattern (syntax ~edition ~major:(major_of unicode_version) f) with
+      | exception _ -> false
+      | _ -> true)
 
 let pattern re = re.pattern
 let flags re = re.flags
 let flags_string re = flags_to_string re.flags
 let match_timeout re = if re.timeout = 0 then None else Some (float_of_int re.timeout /. 1e9)
+let edition (re : t) = re.edition
+let unicode_version_of (re : t) = version_of_major re.major
 let group_count re = re.group_count
 let group_names re = List.map (fun n -> n.name) re.names
 let group_numbers re = List.map (fun n -> (n.name, Array.to_list n.groups)) re.names
@@ -230,7 +263,7 @@ let caps_program re =
     match Atomic.get re.caps with
     | Some p -> p
     | None ->
-        let root, _ = Parse.parse_with re.pattern (syntax re.flags) in
+        let root, _ = Parse.parse_with re.pattern (syntax ~edition:re.edition ~major:re.major re.flags) in
         let p = Prog.make root (unicode re) (Some re.group_count) in
         ignore (Atomic.compare_and_set re.caps None (Some p));
         p

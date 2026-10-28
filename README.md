@@ -10,6 +10,12 @@ later, 64-bit).
 - ECMAScript 2025: lookbehind, named groups (and a name shared between alternatives), modifier groups such as
   `(?i:...)`, and every Unicode property ECMA-262 lists, from tables of Unicode 17 the library carries, so a pattern
   answers the same whichever compiler built it.
+- The grammar of ECMAScript 2020, which JSON Schema 2020-12 names, and a choice of Unicode version, each independent
+  of the other: `compile` takes an `?edition` (`Current`, the default, or `Es2020`) and a `?unicode_version` (`Default`
+  for V8's version, which is 17 today, or `V13`, `V17`, `V18` or `Latest`, which is 18 today). Both are settled when a
+  pattern is compiled and cost a match nothing. The 2020 grammar refuses what later editions added: the `d` and `v`
+  flags, modifier groups, a group name used twice, and property names outside its tables. The tables of a version are
+  made when a pattern first asks for them.
 - Text as UTF-8 (a `string`, or a checked `utf8_text`, which may be a range of a string, checked once and held with no
   copy) or as UTF-16 (a `string` of UTF-16LE code units, lone surrogates and all). The function chooses the encoding,
   and nothing is transcoded. Text that is not UTF-8 is refused, never read as U+FFFD. One matcher serves both
@@ -33,8 +39,9 @@ later, 64-bit).
 **Compliance.** Over the [ECMA-262 test data](https://github.com/corvus-dotnet/ecma262-regex-test-data) (what V8 says
 about its patterns and texts, test262's patterns and `exec` calls, the global search, `replace` and `split` among them,
 and texts of bytes that are not UTF-8, which it refuses), the library gives every answer right and none wrong, refuses
-no valid pattern, accepts no invalid one and reaches no limit, over UTF-8 and over UTF-16. CI runs the whole data on
-every change, on OCaml 4.14 and 5.5.
+no valid pattern, accepts no invalid one and reaches no limit, over UTF-8 and over UTF-16. It does the same on the data
+as the data's own scripts write it for Unicode 13 and 18 and for the grammar of ECMAScript 2020. CI runs the whole data
+on every change, on OCaml 4.14 and 5.5.
 
 It is a port of the Rust crate [corvus-regex-ecma262](https://github.com/corvus-dotnet/corvus-regex-ecma262-rs), and it
 follows the design of the .NET engine [Corvus.Regex.Ecma262](https://github.com/corvus-dotnet/Corvus.Regex.Ecma262).
@@ -50,9 +57,13 @@ let () =
    | Some m -> assert (R.Match.named m "month" = Some "10" && R.Match.start m = 3)
    | None -> assert false);
   (* A pattern from outside: no exception, and a timeout of its own. *)
-  match R.compile ~flags:"u" ~match_timeout:0.1 "[a-z" with
-  | Error e -> print_endline (R.error_message e)
-  | Ok _ -> ()
+  (match R.compile ~flags:"u" ~match_timeout:0.1 "[a-z" with
+   | Error e -> print_endline (R.error_message e)
+   | Ok _ -> ());
+  (* ECMAScript 2020 as its edition was published, with the Unicode of its year. *)
+  let greek = R.compile_exn ~flags:"u" ~edition:R.Es2020 ~unicode_version:R.V13 {|^\p{Script=Greek}+$|} in
+  assert (R.is_match greek "αβγ");
+  assert (not (R.is_valid ~edition:R.Es2020 "(?i:a)"))
 ```
 
 A match that reaches its limit raises `Match_timeout` or `Match_memory`; text that is not UTF-8 raises
@@ -106,8 +117,9 @@ test that a warm match allocates nothing. The stack probe asks about patterns bu
 4 MB and 2 MB (`docs/port-checklist.md`, which also lists every optimisation of the search layer).
 
 `CORVUS_REGEX_MEMO_FROM_THE_START=1` makes every match take its memory of failed places from its first step, which CI
-does for a second run of both. The Unicode tables (`src/ucd_tables.ml` and `src/strings_tables.ml`) are written from
-the Rust crate's by `tools/unicode`, and CI checks they are current.
+does for a second run of both. The Unicode tables of each version (`src/ucd_tables<major>.ml` and
+`src/strings_tables<major>.ml`) and the property names of ECMAScript 2020 (`src/es2020.ml`) are written from the Rust
+crate's by `tools/unicode`, and CI checks they are current.
 
 ## Releasing
 

@@ -2,6 +2,7 @@
    the runner of the Rust crate does (tools/src/bin/dataset.rs there), with the same judging rules.
 
      run <data directory> <wrong-cases output file> [file filter] [utf16|utf8|both] [--compliance <file>]
+         [--edition current|es2020] [--unicode 13|17|18|latest]
 
    Each record is asked about under each grammar V8 found it valid in: the record's flags with u added (the unicode
    answers), the record's flags alone (the legacy answers) and, in the file that has them, the flags with v added (the
@@ -15,6 +16,9 @@
    the record's flags from its lastIndex, right when the positions of the match and of every group, the named groups
    and, with g or y, the lastIndex after are V8's; one answer over UTF-16 and, when the text holds no lone surrogate and
    lastIndex is not between the halves of a pair, one over UTF-8 with positions in bytes.
+
+   With --edition and --unicode the engine reads every pattern with that edition's grammar and that version's tables,
+   and the data is the data as node edition.js apply or node unicode.js apply writes it for them.
 
    With --compliance <file>, the engine's compliance object is written to the file, as the benchmark page reads it
    (docs/implementing-a-source.md in corvus-regex-ecma262-benchmarks). *)
@@ -258,7 +262,12 @@ let modes r =
   let ms = [ { add_flag = "u"; answers = "unicode"; valid = v "unicode" }; { add_flag = ""; answers = "legacy"; valid = v "legacy" } ] in
   match v "unicode_sets" with None -> ms | Some _ as x -> ms @ [ { add_flag = "v"; answers = "unicode_sets"; valid = x } ]
 
-let compile pattern flags = R.compile ~flags ~match_timeout:limit_seconds pattern
+(* The edition and the version of Unicode the engine reads every pattern with (--edition, --unicode). *)
+let edition = ref R.Current
+let unicode_version = ref R.Default
+
+let compile pattern flags =
+  R.compile ~flags ~match_timeout:limit_seconds ~edition:!edition ~unicode_version:!unicode_version pattern
 
 (* The value of f (), or the exception it raised. *)
 let attempt f = match f () with v -> Ok v | exception e -> Error e
@@ -475,6 +484,16 @@ let judge_captures r pattern c wrong =
         Hashtbl.replace cache f v;
         v
   in
+  (* A grammar the data finds the pattern not valid in, as an overlay may, must be refused here too. *)
+  List.iter
+    (fun m ->
+      let mode_flags = if m = "unicode" then flags ^ "u" else flags in
+      let invalid_here = match valid with Some o -> get o m = Some (Bool false) | None -> false in
+      if invalid_here && make mode_flags <> None then begin
+        c.accepted <- c.accepted + 1;
+        wrong := Printf.sprintf "ACCEPTED-INVALID\tcaptures.jsonl\t/%s/%s" shown mode_flags :: !wrong
+      end)
+    [ "unicode"; "legacy" ];
   List.iter
     (fun t ->
       if not (is_true (get t "v8_deviation")) then begin
@@ -679,6 +698,27 @@ let () =
     | [] -> (None, List.rev acc)
   in
   let compliance, args = take_compliance [] args in
+  let rec take_settings acc = function
+    | "--edition" :: e :: rest ->
+        (edition :=
+           match e with
+           | "current" -> R.Current
+           | "es2020" -> R.Es2020
+           | _ -> failwith ("the edition is current or es2020, not " ^ e));
+        take_settings acc rest
+    | "--unicode" :: v :: rest ->
+        (unicode_version :=
+           match v with
+           | "13" | "13.0" -> R.V13
+           | "17" | "17.0" -> R.V17
+           | "18" | "18.0" -> R.V18
+           | "latest" -> R.Latest
+           | _ -> failwith ("the Unicode version is 13, 17, 18 or latest, not " ^ v));
+        take_settings acc rest
+    | x :: rest -> take_settings (x :: acc) rest
+    | [] -> List.rev acc
+  in
+  let args = take_settings [] args in
   match args with
   | directory :: wrong_path :: rest ->
       let filter = match rest with f :: _ -> f | [] -> "*.jsonl" in
@@ -724,5 +764,7 @@ let () =
         (Unix.gettimeofday () -. clock);
       if total.wrong + total.refused + total.accepted + total.errors + total.limited <> 0 then exit 1
   | _ ->
-      prerr_endline "usage: run <data directory> <wrong-cases output file> [file filter] [utf16|utf8|both] [--compliance <file>]";
+      prerr_endline
+        "usage: run <data directory> <wrong-cases output file> [file filter] [utf16|utf8|both] [--compliance <file>] \
+         [--edition current|es2020] [--unicode 13|17|18|latest]";
       exit 2
