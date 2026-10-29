@@ -113,8 +113,10 @@ Every pull request merged into main releases the library with the next patch ver
 `no_release`: `auto-release.yml` runs `tools/release` on the merge, which tags `v<version>` on a commit with the version
 written into `dune-project`, `corvus-regex-ecma262.opam` and `src/corvus_regex_ecma262.ml` (main keeps 0.0.0). The
 release is then submitted to opam-repository, whose CI builds it on every compiler and platform it tests. A change to
-the published documents releases a patch too, since the documentation site takes them from the latest release. A
-change to the benchmark harness alone is a harness release, which publishes the harness image. A pull request that
-needs a minor or major version sets `nextVersion` in `.github/release.json`.
+the benchmark harness alone is a harness release, which publishes the harness image. A pull request that needs a minor
+or major version sets `nextVersion` in `.github/release.json`. The documentation site takes the published documents (the
+getting-started page, the API reference, the design document and this guide) from `main`, and they describe the latest
+release: a change to them alone is merged with `no_release`, and a change to the API carries its documents, which its
+release brings into step.
 
 Changes arrive by pull request, and the `CI gate` check must be green on the branch as it will merge.

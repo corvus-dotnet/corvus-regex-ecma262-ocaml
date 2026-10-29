@@ -9,11 +9,7 @@
         "dune-project",
         "corvus-regex-ecma262.opam",
         "corvus-regex-ecma262.opam.template",
-        "src/",
-        "docs/getting-started.md",
-        "docs/api.md",
-        "docs/design.md",
-        "docs/contributing.md"
+        "src/"
       ],
       "stamp": [
         {
