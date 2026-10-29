@@ -1,0 +1,19 @@
+; The examples of the getting-started page the documentation site publishes (docs/getting-started.md), built and run
+; as a test: extract writes the page's blocks of OCaml as one program, each block a module of its own.
+
+(executable
+ (name extract)
+ (modules extract))
+
+(rule
+ (target getting_started.ml)
+ (deps %{project_root}/docs/getting-started.md)
+ (action
+  (with-stdout-to
+   %{target}
+   (run ./extract.exe %{project_root}/docs/getting-started.md))))
+
+(test
+ (name getting_started)
+ (modules getting_started)
+ (libraries corvus-regex-ecma262))
